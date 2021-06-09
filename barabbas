@@ -1,0 +1,2271 @@
+#!/usr/bin/python3
+
+__version__ = '1.0.0'
+__author__ = 'Tomislav Paskalev'
+__year__ = '2021'
+
+
+################################################################
+# IMPORT REQUIRED LIBRARIES
+################################################################
+
+# IMPORT ONLY WHAT IS REQUIRED
+from argparse import ArgumentParser
+from base64 import b64encode
+from fcntl import ioctl
+from hashlib import md5
+from html import escape
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from io import BytesIO
+from mimetypes import init, inited, types_map
+from os import access, chdir, curdir, error, geteuid, fstat, getcwd, listdir, pardir, path, remove, stat, W_OK
+from posixpath import normpath, splitext
+from random import choice
+from re import findall, finditer
+from shutil import copyfileobj
+from signal import SIGINT, signal
+from socket import AF_INET, gethostname, inet_ntoa, SOCK_DGRAM, socket
+from ssl import SSLError, wrap_socket
+from string import ascii_letters, digits
+from struct import pack
+from subprocess import CalledProcessError, check_output, DEVNULL, run
+from sys import exit
+import urllib.error, urllib.parse, urllib.request
+
+
+################################################################
+# GLOBAL VARIABLES - HARDCODED VALUES - !!! CHANGE THESE !!!
+################################################################
+
+#### OPTIONAL VALUES (CAN BE LEFT UNSPECIFIED/EMPTY)
+# NOTE: ALL VALUES SPECIFIED HERE:
+#   - OVERRIDE PREDEFINED (I.E. DEFAULT) VALUES
+#   - ARE OVERRIDDEN BY CLI-PROVIDED VALUES
+# HTTP BASIC AUTHENTICATION CREDENTIALS (USERNAME:PASSWORD; E.G. 'testuser:testpass')
+hardcoded_http_basic_authn_username_password = ''
+# HTTP BASIC AUTHENTICATION REALM (E.G. 'Test')
+hardcoded_basic_HTTP_authn_realm = ''
+# DISABLE HTTP BASIC AUTHENTICATION (E.G. True)
+hardcoded_authn_disa = None
+# LOCAL NETWORK INTERFACE IP ADDRESS (E.G. '192.168.1.100')
+hardcoded_local_net_iface = ''
+# LISTENING PORT (E.G. 8443)
+hardcoded_list_port = None
+# WEB ROOT DIRECTORY FULL PATH (E.G. '/tmp')
+hardcoded_web_root_dir_full_path = ''
+# X.509 CERTIFICATE FILE FULL PATH (E.G. '/usr/local/sbin/cert.pem')
+hardcoded_x509_cert_full_path = ''
+# DISABLE TLS ENCRYPTION (E.G. True)
+hardcoded_encr_disa = None
+# DISABLE FILE MD5 CHECKSUMS (E.G. True)
+hardcoded_file_md5_chksm_disa = None
+# ALLOWED IP ADDRESS(ES) (COMMA SEPARATED LIST; E.G. '192.168.1.110,192.168.1.120,192.168.1.125')
+hardcoded_allowed_client_IPs = ''
+# DISABLE IPTABLES ACCESS RESTRICTION (IP LAYER OF OSI REFERENCE MODEL; E.G. True)
+hardcoded_IP_acc_restr_disa = None
+# DISABLE HTTP ACCESS RESTRICTION (APPLICATION LAYER OF OSI REFERENCE MODEL; E.G. True)
+hardcoded_app_acc_restr_disa = None
+# 'OPENSSL' BINARY FULL PATH (E.G. '/usr/local/sbin/openssl')
+hardcoded_openssl_bin_full_path = ''
+# 'IPTABLES' BINARY FULL PATH (E.G. '/usr/local/sbin/iptables')
+hardcoded_iptables_bin_full_path = ''
+# TEMPORARY X.509 CERTIFICATE COMMON NAME (REQUIRED BY AUTOGENERATE X.509 CERTIFICATE FUNCTIONALITY)
+#   REQUIRED FOR X.509 CERTIFICATE CLIENT-SIDE VALIDATION (AUTHENTICATES SERVER-SIDE/AVOIDS BLINDLY ACCEPTING SELF-SIGNED CERTIFICATES/MITIGATES MAN-IN-THE-MIDDLE RISK)
+#   VALID VALUES: IP ADDRESS OF LOCAL LISTENING NETWORK INTERFACE OR (ARBITRARY) HOSTNAME (E.G. '192.168.1.100'; 'kali')
+#     RESOLVED (ARBITRARY) HOSTNAME MUST MATCH LISTENING NETWORK INTERFACE IP ADDRESS (I.E. MUST BE DNS RESOLVABLE FROM CLIENT SYSTEM => MODIFY HOSTS FILE IF NEEDED)
+#     NOTES - LINUX:
+#       CURL X.509 CERTIFICATE VALIDATION WILL WORK WITH BOTH IP ADDRESS OF LOCAL LISTENING NETWORK INTERFACE OR HOSTNAME VALUES
+#       WGET X.509 CERTIFICATE VALIDATION WILL WORK ONLY WITH HOSTNAME VALUE
+#     NOTES - WINDOWS:
+#       POWERSHELL X.509 CERTIFICATE VALIDATION WILL WORK WITH BOTH IP ADDRESS OF LOCAL LISTENING NETWORK INTERFACE OR HOSTNAME VALUES
+hardcoded_temp_x509_cert_CN = ''
+
+#### REQUIRED VALUES (MUST BE SPECIFIED)
+# TEMPORARY X.509 CERTIFICATE SUBJECT DATA (REQUIRED BY AUTOGENERATE X.509 CERTIFICATE FUNCTIONALITY; E.G. '/C=.../ST=.../L=.../O=.../OU=.../CN=')
+#   NOTE: COMMON NAME (CN) IS CONCATENATED SEPARATELY (LATER)
+hardcoded_temp_x509_cert_subj = '/C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/OU=Microsoft Corporation/CN='
+# 'WHICH' BINARY FULL PATH
+hardcoded_which_bin_full_path = '/bin/which'
+
+
+################################################################
+# GLOBAL VARIABLES - FINAL VALUES
+################################################################
+
+final_authn_disa = False
+final_encr_disa = False
+final_base64_enc_username_password = ''
+final_username = ''
+final_password = ''
+final_local_net_iface = ''
+user_local_net_iface = ''
+final_list_port = ''
+user_list_port = ''
+final_allowed_client_IPs_list = []
+final_x509_cert_full_path = ''
+final_temp_x509_cert_subj_full = ''
+final_web_root_dir_full_path = ''
+final_openssl_bin_full_path = ''
+final_openssl_bin_full_path_found = ''
+final_iptables_bin_full_path = ''
+final_iptables_bin_full_path_found = ''
+final_file_md5_chksm_disa = False
+final_IP_acc_restr_disa = False
+final_app_acc_restr_disa = False
+
+
+################################################################
+# GLOBAL VARIABLES - MISC
+################################################################
+
+authn_clients_list = []
+allwd_clients_list = []
+restr_clients_list = []
+
+
+################################################################
+# CLASSES
+################################################################
+
+# HTTP REQUEST HANDLER WITH UPLOAD AND AUTHENTICATION FUNCTIONALITIES
+class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
+
+    # CHANGE PREDEFINED HTTP RESPONSE SERVER HEADER VALUE
+    server_version = 'Apache'
+    sys_version = ''
+
+
+    # [FUNCTION] OVERRIDE LOGGING HANDLING (1)
+    def log_request(self, code='-', size='-'):
+        self.log_message(
+            '"%s" %s %s', self.requestline, str(code),
+            str(size)
+        )
+
+
+    # [FUNCTION] OVERRIDE LOGGING HANDLING (2)
+    def log_message(self, format, *args):
+        print_indented_line(
+            2, 'INFO',
+            (
+                '%s - - [%s] %s' % (
+                    self.address_string(),
+                    self.log_date_time_string(),
+                    format%args
+                    )
+                )
+            )
+
+
+    # [FUNCTION] OVERRIDE LOGGING HANDLING (3)
+    def send_response(self, code, message=None):
+        self.log_request(code, message)
+        self.send_response_only(code, message)
+        self.send_header('Server', self.version_string())
+        self.send_header('Date', self.date_time_string())
+
+
+    # [FUNCTION] OVERRIDE REQUEST HANDLING
+    def handle(self):
+        self.close_connection = True
+        try:
+            self.handle_one_request()
+        except ConnectionResetError:
+            print_indented_line(
+                2, 'WARNING',
+                ('Connection reset by client (X.509 CN) [' + self.client_address[0] + ']')
+                )
+            pass
+        # CATCH TLSV1_ALERT_UNKNOWN_CA, SENT BY SOME CLIENTS, WHEN NOT POSSIBLE TO VERIFY SERVER CERTIFICATE (UNKNOWN ISSUER)
+        except SSLError:
+            pass
+        while not self.close_connection:
+            self.handle_one_request()
+
+
+    # [FUNCTION] CALCULATE MD5 CHECKSUM OF PROVIDED FILE
+    def calc_file_chksm_md5(self, provided_file_full_path):
+
+        # [FUNCTION] READ CONTENTS OF PROVIDED FILE AND UPDATE PROVIDED MD5 HASH OBJECT
+        def update_md5_chksm(provided_md5_hash, provided_file):
+            while True:
+                provided_file_data_chunk = provided_file.read(8192)
+                # END OF FILE REACHED
+                if (not provided_file_data_chunk):
+                    break
+                provided_md5_hash.update(provided_file_data_chunk)
+            return provided_md5_hash
+
+
+        # OPEN PROVIDED FILE AND CALCULATE ITS MD5 CHECKSUM
+        with open(provided_file_full_path, 'rb') as provided_file:
+            md5_hash = md5()
+            update_md5_chksm(md5_hash, provided_file)
+            return (md5_hash.hexdigest())
+
+
+    # [FUNCTION] CHECK IF CURRENT CLIENT IS ALLOWED ACCESS TO WEB SERVER
+    def is_client_IP_allowed(self):
+        # ALLOW MODIFICATION OF GLOBAL VARIABLES
+        global allwd_clients_list
+        global restr_clients_list
+
+
+        # [FUNCTION] PRINT CURRENT CLIENT STATUS MESSAGE (ALLOW/DENY)
+        def print_client_status_msg(provided_client_status_msg_status, provided_client_status_msg_type, provided_client_IP_addr):
+
+            # [FUNCTION] PRINT MESSAGE
+            def print_msg(provided_client_status_msg_status, provided_client_status_msg_type, provided_client_IP_addr, provided_restr_type):
+                print_indented_line(
+                    2, provided_client_status_msg_type,
+                    ('Access ' + provided_client_status_msg_status  + ' (' + provided_restr_type  + ') [' + provided_client_IP_addr + ']')
+                    )
+
+
+            # IP LAYER RESTRICTION ENABLED (IPTABLES)
+            if (not final_IP_acc_restr_disa):
+                print_msg(
+                    provided_client_status_msg_status, provided_client_status_msg_type,
+                    provided_client_IP_addr, 'IP'
+                    )
+
+            # APPLICATION LAYER RESTRICTION ENABLED (HTTP)
+            if (not final_app_acc_restr_disa):
+                print_msg(
+                    provided_client_status_msg_status, provided_client_status_msg_type,
+                    provided_client_IP_addr, 'HTTP'
+                    )
+
+
+        # [FUNCTION] HANDLE CURRENT CLIENT ACCESS STATUS
+        def handle_client_status(provided_client_status_msg_status, provided_client_IP_addr):
+            # CURRENT CLIENT IP ADRESS NOT IN LIST OF ALLOWED CLIENTS
+            if ((provided_client_status_msg_status == 'allowed') and (provided_client_IP_addr not in allwd_clients_list)):
+                allwd_clients_list.append(provided_client_IP_addr)
+                print_client_status_msg(
+                    provided_client_status_msg_status, 'SUCCESS',
+                    provided_client_IP_addr
+                    )
+                return
+            # CURRENT CLIENT IP ADRESS NOT IN LIST OF DISALLOWED CLIENTS
+            if ((provided_client_status_msg_status == 'denied') and (provided_client_IP_addr not in restr_clients_list)):
+                restr_clients_list.append(provided_client_IP_addr)
+                print_client_status_msg(
+                    provided_client_status_msg_status, 'WARNING',
+                    provided_client_IP_addr
+                    )
+                return
+            # INVALID STATUS MESSAGE PROVIDED
+            if ((provided_client_status_msg_status != 'allowed') and (provided_client_status_msg_status != 'denied')):
+                print_indented_line(
+                    0, 'ERROR',
+                    'is_client_IP_allowed.handle_client_status invalid message status'
+                    )
+                exit()
+
+
+        # BOTH ACCESS RESTRICTION LAYERS DISABLED (IP; APPLICATION)
+        if (final_IP_acc_restr_disa and final_app_acc_restr_disa):
+            return True
+
+        # ACCESS RESTRICTION ENABLED
+        #   LOOP ALL ALLOWED CLIENT IP ADDRESSES
+        for allowed_IP in final_allowed_client_IPs_list:
+            # ANY IP ADDRESS IS ALLOWED
+            if (allowed_IP == '0.0.0.0'):
+                handle_client_status('allowed', self.client_address[0])
+                return True
+            # CURRENT CLIENT IP ADDRESS IS ALLOWED
+            if (allowed_IP == self.client_address[0]):
+                handle_client_status('allowed', self.client_address[0])
+                return True
+        # CURRENT CLIENT IP ADDRESS IS NOT ALLOWED
+        handle_client_status('denied', self.client_address[0])
+        return False
+
+
+    # [FUNCTION] ATTEMPT TO AUTHENTICATE CURRENT CLIENT USING HTTP BASIC AUTHENTICATION
+    def try_client_authn_HTTP_basic(self):
+        # ALLOW MODIFICATION OF GLOBAL VARIABLES
+        global authn_clients_list
+
+
+        # [FUNCTION] PRINT CURRENT CLIENT STATUS MESSAGE (AUTHENTICATED/UNAUTHENTICATED)
+        def print_client_status_msg(provided_client_status_msg_status, provided_client_status_msg_type, provided_client_IP_addr):
+            print_indented_line(
+                2, provided_client_status_msg_type,
+                (provided_client_status_msg_status  + ' [' + provided_client_IP_addr + ']')
+                )
+
+
+        # [FUNCTION] HANDLE CURRENT CLIENT AUTHENTICATION STATUS
+        def handle_client_status(provided_client_status_msg_status, provided_client_IP_addr):
+            # CURRENT CLIENT IP ADRESS NOT IN LIST OF AUTHENTICATED CLIENTS
+            if ((provided_client_status_msg_status == 'authn') and (provided_client_IP_addr not in authn_clients_list)):
+                authn_clients_list.append(provided_client_IP_addr)
+                print_client_status_msg(
+                    'Authenticated', 'SUCCESS',
+                    provided_client_IP_addr
+                    )
+                return
+            # CURRENT CLIENT IP ADRESS NOT IN LIST OF AUTHENTICATED CLIENTS
+            if (provided_client_status_msg_status == 'unauthn'):
+                print_client_status_msg(
+                    'Not authenticated', 'WARNING',
+                    provided_client_IP_addr
+                    )
+            # CURRENT CLIENT IP ADRESS NOT IN LIST OF AUTHENTICATED CLIENTS + CURRENT CLIENT ALREADY PREVIOUSLY AUTHENTICATED => REMOVE FROM LIST OF AUTHENTICATED CLIENTS
+            if (
+                   (provided_client_status_msg_status == 'unauthn')
+                   and
+                   (provided_client_IP_addr in authn_clients_list)
+                   ):
+                authn_clients_list.remove(provided_client_IP_addr)
+                return
+            # INVALID STATUS MESSAGE PROVIDED
+            if ((provided_client_status_msg_status != 'authn') and (provided_client_status_msg_status != 'unauthn')):
+                print_indented_line(
+                    0, 'ERROR',
+                    'try_client_authn_HTTP_basic.handle_client_status invalid message status'
+                    )
+                exit()
+
+
+        authz_header = self.headers.get('Authorization')
+        # CHECK IF CURRENT CLIENT AUTHENTICATED (I.E. AUTHORIZED TO ACCESS WEB SERVER SERVICE) - HTTP BASIC AUTHENTICATION LEVEL
+        authn_result = (
+            authz_header and (
+                authz_header == (
+                    'Basic '
+                    + str(final_base64_enc_username_password)
+                    )
+                )
+            )
+
+        # CURRENT CLIENT NOT AUTHENTICATED
+        if (not authn_result):
+            # SEND HTTP 401 BASIC AUTHENTICATION RESPONSE HEADER
+            self.send_response(401)
+            self.send_header('WWW-Authenticate', 'Basic realm="' + hardcoded_basic_HTTP_authn_realm + '", charset="UTF-8"')
+            self.send_header('Content-Type', 'text/html; charset=UTF-8')
+            self.end_headers()
+            handle_client_status('unauthn', self.client_address[0])
+            return False
+        # CURRENT CLIENT AUTHENTICATED
+        handle_client_status('authn', self.client_address[0])
+        return True
+
+
+    # [FUNCTION] CHECK IF CURRENT CLIENT AUTHENTICATED - HIGH LEVEL
+    def is_client_authn(self):
+        # ALLOW MODIFICATION OF GLOBAL VARIABLES
+        global authn_clients_list
+
+        # AUTHENTICATION ENABLED
+        if (not final_authn_disa):
+            # CURRENT CLIENT NOT AUTHENTICATED
+            if (not self.try_client_authn_HTTP_basic()):
+                return False
+        #     CURRENT CLIENT AUTHENTICATED
+        return True
+
+
+    # [FUNCTION] PERFORM SECURITY CHECKS ON CURRENT CLIENT
+    def is_client_allowed(self):
+        # CHECK IF CURRENT CLIENT IS ALLOWED ACCESS
+        if (not self.is_client_IP_allowed()):
+            return False
+
+        # CHECK IF CURRENT CLIENT AUTHENTICATED
+        if (not self.is_client_authn()):
+            return False
+
+        # CURRENT CLIENT ALLOWED ACCESS AND AUTHENTICATED
+        return True
+
+
+    # [FUNCTION] SERVE HTTP HEAD REQUEST
+    def do_HEAD(self):
+        return
+
+
+    # [FUNCTION] SERVE HTTP GET REQUEST
+    def do_GET(self):
+        # PERFORM SECURITY CHECKS ON CURRENT CLIENT
+        if (not self.is_client_allowed()):
+            return
+
+        # PROCESS GET REQUEST
+        req_file = self.process_HTTP_GET_req()
+        #   FILE REQUESTED
+        if req_file:
+            self.copy_file_obj(req_file, self.wfile)
+            req_file.close()
+        return
+
+
+    # [FUNCTION] SERVE HTTP POST REQUEST
+    def do_POST(self):
+        # PERFORM SECURITY CHECKS ON CURRENT CLIENT
+        if (not self.is_client_allowed()):
+            return
+
+        # PROCESS HTTP POST FILE UPLOAD REQUEST
+        file_upload_status, file_upload_status_message, file_upload_size = self.process_HTTP_POST_req()
+
+        # CONSTRUCT MESSAGE BODY OF HTTP RESPONSE
+        #   CREATE READABLE/WRITABLE BYTE OBJECT
+        HTTP_resp_msg_body = BytesIO()
+        #   START HTML
+        HTTP_resp_msg_body.write(b'<!DOCTYPE html>\n')
+        HTTP_resp_msg_body.write(b'<html>\n<head>\n<title>File Upload Status Page</title>\n</head>\n')
+        HTTP_resp_msg_body.write(b'<body>\n<h2>File Upload Status</h2>\n')
+        HTTP_resp_msg_body.write(
+            ('<hr>\n<button onclick="window.location.href=\'%s\';">Back</button>\n' % self.headers['Referer']).encode()
+            )
+        HTTP_resp_msg_body.write(b'<hr>\n')
+        #   FILE SUCCESSFULLY UPLOADED
+        if file_upload_status:
+            HTTP_resp_msg_body.write(b'<pre style="font-size: 1.3em;"><strong><span style="color:green;">[+]</span></strong> ')
+        #   FILE NOT SUCCESSFULLY UPLOADED
+        else:
+            HTTP_resp_msg_body.write(b'<pre style="font-size: 1.3em;"><strong><span style="color:red;">[-]</span></strong> ')
+        #   APPEND MESSAGE
+        HTTP_resp_msg_body.write(file_upload_status_message.encode())
+        #   END HTML
+        HTTP_resp_msg_body.write(b'</pre>\n<hr>\n</body>\n</html>')
+
+        # CALCULATE LENGTH OF HTTP RESPONSE MESSAGE BODY
+        HTTP_resp_msg_body_len = HTTP_resp_msg_body.tell()
+        HTTP_resp_msg_body.seek(0)
+
+        # CONSTRUCT AND SEND HTTP RESPONSE MESSAGE
+        self.send_response(200, str(file_upload_size))
+        self.send_header('Content-Type', 'text/html')
+        self.send_header('Content-Length', str(HTTP_resp_msg_body_len))
+        self.end_headers()
+        if HTTP_resp_msg_body:
+            self.copy_file_obj(HTTP_resp_msg_body, self.wfile)
+            HTTP_resp_msg_body.close()
+
+        # PRINT STATUS MESSAGE ONCE HTTP POST REQUEST PROCESSED
+        #   FILE SUCCESSFULLY UPLOADED
+        if file_upload_status:
+            print_indented_line(
+                2, 'SUCCESS',
+                (file_upload_status_message + ' [' + str(self.client_address[0]) + ']')
+                )
+        #   FILE NOT SUCCESSFULLY UPLOADED
+        else:
+            print_indented_line(
+                2, 'ERROR',
+                (file_upload_status_message + ' [' + str(self.client_address[0]) + ']')
+                )
+        return
+
+
+    # [FUNCTION] PROCESS HTTP POST REQUEST - UPLOAD FILE (MULTIPART/FORM-DATA)
+    def process_HTTP_POST_req(self):
+        # CHECK FOR CONTENT-TYPE HTTP HEADER
+        content_type_HTTP_header = self.headers['Content-Type']
+        if (not content_type_HTTP_header):
+            return (False, 'No Content-Type HTTP header', None)
+        # PARSE BOUNDARY MARKER
+        try:
+            boundary_marker = content_type_HTTP_header.split('=')[1].encode()
+        except IndexError:
+            return(False, 'Invalid Content-Type HTTP header', None)
+
+        # GET TOTAL CONTENT LENGTH
+        remaining_bytes = int(self.headers['Content-Length'])
+
+        # PROCESS FIRST LINE OF CONTENT - BOUNDARY MARKER
+        content_first_line = self.rfile.readline()
+        remaining_bytes -= len(content_first_line)
+        if (not boundary_marker in content_first_line):
+            return (False, 'Content does not begin with boundary', None)
+
+        # PROCESS SECOND LINE OF CONTENT - CONTENT-DISPOSITION
+        content_second_line = self.rfile.readline()
+        remaining_bytes -= len(content_second_line)
+        # NOTE: CURL USES STATIC STRING "FILE" AS NAME IN CONTENT-DISPOSITION HEADER
+        content_disposition_content_list = findall(
+            r'Content-Disposition.*name="file"; filename="(.*)"',
+            content_second_line.decode()
+            )
+        if (not content_disposition_content_list):
+            return (False, 'Content-Disposition HTTP header error', None)
+        # FILENAME EMPTY
+        if (not content_disposition_content_list[0]):
+            return(False, 'No file(name) provided', None)
+
+        # PROCESS THIRD LINE OF CONTENT - CONTENT-TYPE
+        content_third_line = self.rfile.readline()
+        remaining_bytes -= len(content_third_line)
+
+        # PROCESS FOURTH LINE OF CONTENT - CRLF
+        content_fourth_line = self.rfile.readline()
+        remaining_bytes -= len(content_fourth_line)
+
+        # GET FULL PATH OF DESTINATION FILENAME
+        dest_dir_full_path = self.transl_rel_path_to_full_path(self.path)
+        dest_file_full_path = path.join(
+            dest_dir_full_path,
+            content_disposition_content_list[0]
+            )
+
+        # ATTEMPT TO OPEN DESTINATION FILE FOR WRITING
+        try:
+            dest_file = open(dest_file_full_path, 'wb')
+        except IOError:
+            return (False, 'Insufficient file permissions (write)', None)
+
+        # PROCESS FIFTH LINE OF CONTENT - FIRST LINE OF UPLOADED FILE'S CONTENT
+        content_fifth_line = self.rfile.readline()
+        remaining_bytes -= len(content_fifth_line)
+        content_previous_line = content_fifth_line
+        # SET TOTAL UPLOADED FILE SIZE TO 0
+        uploaded_file_size = 0
+
+        # PROCESS REMAINING LINES OF CONTENT
+        while remaining_bytes > 0:
+            content_current_line = self.rfile.readline()
+            remaining_bytes -= len(content_current_line)
+            # CURRENT LINE CONTAINS BOUNDARY MARKER => LAST LINE OF CONTENT
+            if (boundary_marker in content_current_line):
+                # TRIM LF
+                content_previous_line = content_previous_line[0:-1]
+                # TRIM CR, IF APPLICABLE
+                if (content_previous_line.endswith(b'\r')):
+                    content_previous_line = content_previous_line[0:-1]
+                # ADD CONTENT SIZE TO TOTAL UPLOADED FILE SIZE
+                uploaded_file_size += len(content_previous_line)
+                # WRITE PREVIOUS CONTENT LINE TO DESTINATION FILE
+                dest_file.write(content_previous_line)
+                # CLOSE DESTINATION FILE
+                dest_file.close()
+                # FILE MD5 CHECKSUM FEATURE ENABLED
+                if (not final_file_md5_chksm_disa):
+                    # RETURN FULL DESTINATION PATH AND MD5 HASHSUM OF UPLOADED FILE
+                    return (
+                        True,
+                        (
+                            'FILE UPLOADED: \'%s\' (MD5 %s)' % (
+                                dest_file_full_path,
+                                self.calc_file_chksm_md5(dest_file_full_path)
+                                )
+                            ),
+                        uploaded_file_size
+                        )
+                # FILE MD5 CHECKSUM FEATURE DISABLED
+                else:
+                    # RETURN FULL DESTINATION PATH OF UPLOADED FILE
+                    return (
+                        True,
+                        (
+                            'FILE UPLOADED: \'%s\'' % dest_file_full_path
+                            ),
+                        uploaded_file_size
+                        )
+            # CURRENT LINE DOES NOT CONTAIN BOUNDARY MARKER => WRITE PREVIOUS CONTENT LINE TO DESTINATION FILE
+            else:
+                # ADD CONTENT SIZE TO TOTAL UPLOADED FILE SIZE
+                uploaded_file_size += len(content_previous_line)
+                dest_file.write(content_previous_line)
+                content_previous_line = content_current_line
+
+        # UNEXPECTED END OF DATA
+        return (False, 'Unexpected end of data (Content-Length)', None)
+
+
+    # [FUNCTION] PROCESS HTTP GET REQUEST - DISPLAY CONTENTS OF REQUESTED RESOURCE (DIRECTORY/FILE)
+    def process_HTTP_GET_req(self):
+        req_res_full_path = self.transl_rel_path_to_full_path(self.path)
+
+        # REQUESTED RESOURCE = DIRECTORY
+        if (path.isdir(req_res_full_path)):
+            # REQUESTED DIRECTORY NAME DOES NOT END WITH FORWARD SLASH (INVALID DIRECTORY NAME)
+            if (not self.path.endswith('/')):
+                # HTTP REDIRECT TO PROPER DIRECTORY
+                self.send_response(301)
+                self.send_header('Location', (self.path + '/'))
+                self.end_headers()
+                return None
+            # REQUESTED DIRECTORY NAME DOES END WITH FORWARD SLASH (VALID DIRECTORY NAME)
+            else:
+                return (self.display_dir_contents(req_res_full_path))
+
+        # REQUESTED RESOURCE = FILE
+        #   ATTEMPT TO READ REQUESTED FILE
+        req_file = None
+        try:
+            # READ FILE IN BINARY MODE (AVOIDS NEWLINE TRANSLATION ERRORS)
+            req_file = open(req_res_full_path, 'rb')
+        except IOError:
+        #     FILE DOES NOT EXIST
+            self.send_error(404, 'File not found')
+            return None
+        #     FILE DOES EXIST => ASSEMBLE HTTP RESPONSE HEADER
+        #       GET STATISTICS OF FILE
+        req_file_stats = fstat(req_file.fileno())
+        #       SEND HTTP RESPONSE + LOG FILE SIZE
+        self.send_response(200, str(req_file_stats.st_size))
+        #       GUESS MIME TYPE OF FILE + SET CONTENT-TYPE HTTP HEADER
+        req_file_MIME_type = self.guess_file_MIME_type(req_res_full_path)
+        self.send_header('Content-Type', req_file_MIME_type)
+        #       SET CONTENT-LENGTH AND LAST-MODIFIED HTTP HEADERS
+        self.send_header('Content-Length', str(req_file_stats.st_size))
+        self.send_header('Last-Modified', self.date_time_string(req_file_stats.st_mtime))
+        self.end_headers()
+        #       RETURN CONTENTS OF FILE
+        return req_file
+
+
+    # [FUNCTION] DISPLAY DIRECTORY CONTENTS
+    def display_dir_contents(self, provided_dir_full_path):
+
+        # [FUNCTION] CONVERT ALL ALPHABET CHARACTERS IN PROVIDED STRING TO LOWERCASE CHARACTERS
+        def str_to_lower_case(provided_filename):
+            return provided_filename.lower()
+
+
+        # [FUNCTION] CONVERT PROVIDED FILE SIZE IN BYTES TO HUMAN READABLE FORM
+        def conv_fsize_to_hread_form(provided_file_size, file_size_suffix='B'):
+            for file_size_unit in [
+                    '','Ki','Mi',
+                    'Gi','Ti','Pi',
+                    'Ei','Zi'
+                    ]:
+                if (abs(provided_file_size) < 1024.0):
+                    return (
+                        '%3.1f %s%s' % (
+                            provided_file_size,
+                            file_size_unit,
+                            file_size_suffix
+                            )
+                        )
+                provided_file_size /= 1024.0
+            return (
+                '%.1f %s%s' % (
+                    provided_file_size,
+                    'Yi',
+                    file_size_suffix
+                    )
+                )
+
+
+        # [FUNCTION] GENERATE LINE (CONTAINING SERVER CONTENT INFORMATION) FOR HTTP RESPONSE MESSAGE BODY
+        def gen_HTTP_resp_msg_body_line(
+                provided_res_type, provided_file_size, provided_res_md5_chksm,
+                provided_res_linked_name, provided_res_displayed_name
+                ):
+            # FILE MD5 CHECKSUM FEATURE ENABLED
+            if (not final_file_md5_chksm_disa):
+                # CREATE HTML LINK
+                return (
+                    '<li style="list-style-type: none;"><pre>%s  %s  (MD5 %s)  <a href="%s">%s</a></pre></li>\n' % (
+                        provided_res_type,
+                        provided_file_size.rjust(9),
+                        provided_res_md5_chksm,
+                        provided_res_linked_name,
+                        provided_res_displayed_name
+                        )
+                    ).encode()
+            # FILE MD5 CHECKSUM FEATURE DISABLED
+            else:
+                # CREATE HTML LINK
+                return (
+                    '<li style="list-style-type: none;"><pre>%s  %s  <a href="%s">%s</a></pre></li>\n' % (
+                        provided_res_type,
+                        provided_file_size.rjust(9),
+                        provided_res_linked_name,
+                        provided_res_displayed_name
+                        )
+                    ).encode()
+
+
+        # ATTEMPT TO LIST CONTENTS OF REQUESTED DIRECTORY
+        try:
+            provided_dir_filenames_list = listdir(provided_dir_full_path)
+        except error:
+            self.send_error(404, 'Insufficient directory permissions (read)')
+            return None
+        # SORT RESULTS
+        provided_dir_filenames_list.sort(key=str_to_lower_case)
+
+        # CONSTRUCT MESSAGE BODY OF HTTP RESPONSE
+        #   GET CURRENT DIRECTORY FULL PATH
+        current_dir_full_path = getcwd()
+        #   CREATE READABLE/WRITABLE BYTE OBJECT
+        HTTP_resp_msg_body = BytesIO()
+        #   START HTML
+        HTTP_resp_msg_body.write(b'<!DOCTYPE html>\n')
+        HTTP_resp_msg_body.write(b'<html>\n<head>\n<title>Directory Listing Page</title>\n</head>\n')
+        HTTP_resp_msg_body.write(
+            ('<body>\n<h2>Directory Listing of %s</h2>\n' % provided_dir_full_path).encode()
+            )
+        HTTP_resp_msg_body.write(b'<hr>\n')
+        #   HTTP POST UPLOAD FORM
+        HTTP_resp_msg_body.write(b'<form ENCTYPE="multipart/form-data" method="post">')
+        HTTP_resp_msg_body.write(b'<input name="file" type="file"/>')
+        HTTP_resp_msg_body.write(b'<input type="submit" value="Upload"/></form>\n')
+        HTTP_resp_msg_body.write(b'<hr>\n<ul style="font-size: 1.3em;">\n')
+        #   ADD "ONE DIRECTORY UP", IF NOT IN WEB ROOT DIRECTORY
+        if (provided_dir_full_path != final_web_root_dir_full_path):
+            HTTP_resp_msg_body.write(
+                gen_HTTP_resp_msg_body_line(
+                    '[DIR] ', '-', ('-' + ' '*31),
+                    '../', '../'
+                    )
+                )
+        #   LOOP THROUGH ALL IDENTIFIED FILENAMES
+        for filename in provided_dir_filenames_list:
+            filename_full_path = path.join(provided_dir_full_path, filename)
+            filename_displayed_name = filename_linked_name = filename
+            # DIRECTORY - APPEND '/' TO BOTH DISPLAYED AND LINKED NAME
+            if (path.isdir(filename_full_path)):
+                filename_displayed_name = filename + '/'
+                filename_linked_name = filename + '/'
+                HTTP_resp_msg_body.write(
+                    gen_HTTP_resp_msg_body_line(
+                        '[DIR] ', '-', ('-' + ' '*31),
+                        urllib.parse.quote(filename_linked_name), escape(filename_displayed_name)
+                        )
+                    )
+            # SYMLINK - CALCULATE MD5 CHECKSUM
+            elif (path.islink(filename_full_path)):
+                HTTP_resp_msg_body.write(
+                    gen_HTTP_resp_msg_body_line(
+                        '[SLNK]', conv_fsize_to_hread_form(
+                            stat(filename_full_path).st_size
+                            ),
+                            self.calc_file_chksm_md5(filename_full_path),
+                        urllib.parse.quote(filename_linked_name), escape(filename_displayed_name)
+                        )
+                    )
+            # FILE - CALCULATE MD5 CHECKSUM
+            elif (path.isfile(filename_full_path)):
+                HTTP_resp_msg_body.write(
+                    gen_HTTP_resp_msg_body_line(
+                        '[FILE]', conv_fsize_to_hread_form(
+                            stat(filename_full_path).st_size
+                            ),
+                            self.calc_file_chksm_md5(filename_full_path),
+                        urllib.parse.quote(filename_linked_name), escape(filename_displayed_name)
+                        )
+                    )
+        #   END HTML
+        HTTP_resp_msg_body.write(b'</ul>\n<hr>\n</body>\n</html>')
+
+        #   CALCULATE LENGTH OF MESSAGE BODY OF HTTP RESPONSE
+        HTTP_resp_msg_body_len = HTTP_resp_msg_body.tell()
+        HTTP_resp_msg_body.seek(0)
+        #   ASSEMBLE HTTP RESPONSE HEADER
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html')
+        self.send_header('Content-Length', str(HTTP_resp_msg_body_len))
+        self.end_headers()
+        #   RETURN ASSEMBLED MESSAGE BODY OF HTTP RESPONSE
+        return HTTP_resp_msg_body
+
+
+    # [FUNCTION] TRANSLATE PROVIDED RELATIVE PATH TO FULL PATH (DIRECTORY/FILE)
+    def transl_rel_path_to_full_path(self, provided_rel_path):
+        # REMOVE ANY HTTP QUERY PARAMETERS IN PROVIDED RESOURCE PATH
+        provided_rel_path = provided_rel_path.split('?',1)[0]
+        # REMOVE ANY COMMENTS IN PROVIDED RESOURCE PATH
+        provided_rel_path = provided_rel_path.split('#',1)[0]
+        # NORMALIZE RESULTING PROVIDED RESOURCE PATH
+        normalized_provided_rel_path = normpath(urllib.parse.unquote(provided_rel_path))
+        # SPLIT NORMALIZED PROVIDED RESOURCE PATH
+        normalized_provided_rel_path_words_list = normalized_provided_rel_path.split('/')
+        # REMOVE EMPTY ELEMENTS
+        rel_path_words_list = filter(None, normalized_provided_rel_path_words_list)
+
+        # GET CURRENT DIRECTORY
+        req_res_full_path = getcwd()
+        # LOOP THROUGH ALL IDENTIFIED ELEMENTS
+        for rel_path_word in rel_path_words_list:
+            # ASSEMBLE FULL PATH TO REQUESTED RESOURCE
+            req_res_full_path = path.join(req_res_full_path, rel_path_word)
+        # RETURN ASSEMBLED FULL PATH TO REQUESTED RESOURCE
+        return req_res_full_path
+
+
+    # [FUNCTION] COPY SOURCE FILE OBJECT TO DESTINATION FILE OBJECT
+    def copy_file_obj(self, src_file_obj, dest_file_obj):
+        copyfileobj(src_file_obj, dest_file_obj)
+
+
+    # [FUNCTION] GUESS MIME TYPE OF PROVIDED FILE
+    def guess_file_MIME_type(self, provided_file_full_path):
+        # SPLIT FULL PATH OF PROVIDED FILE INTO FILE BASE AND FILE EXTENSION
+        file_base, file_ext = splitext(provided_file_full_path)
+        # EXTENSION IN LIST OF MIME TYPES
+        if (file_ext in self.file_ext_map):
+            return self.file_ext_map[file_ext]
+        # CONVERT FILE EXTENSION TO LOWERCASE
+        file_ext = file_ext.lower()
+        #   EXTENSION IN LIST OF MIME TYPES
+        if (file_ext in self.file_ext_map):
+            return self.file_ext_map[file_ext]
+        #   EXTENSION NOT IN LIST OF MIME TYPES => SET TO EMPTY (CONVERTED TO DEFAULT VALUE)
+        return (self.file_ext_map[''])
+
+
+    # INITIALIZE GLOBAL DATA STRUCTURES FOR MIME.TYPES
+    if (not inited):
+        init()
+    # CREATE MIME TYPE DICTIONARY MAPPING
+    file_ext_map = types_map.copy()
+    # UPDATE CURRENT MIME TYPE DICTIONARY MAPPING
+    file_ext_map.update(
+        {
+            # DEFINE DEFAULT MIME TYPE - BINARY FILE
+            '': 'application/octet-stream',
+            }
+        )
+
+
+################################################################
+# FUNCTIONS - TOOL OUTPUT HANDLING
+################################################################
+
+# [FUNCTION] PRINT PROVIDED MESSAGE TO STDOUT (COLORED/CATEGORIZED; INDENTED)
+def print_indented_line(provided_indent_depth, provided_msg_type, provided_msg_text):
+    # PREDEFINED MESSAGE TYPES
+    #   INFORMATIONAL MESSAGE
+    if (provided_msg_type == 'INFO'):
+        print(
+            ('   ' * provided_indent_depth + '\033[1;37m[*]\033[1;m ' + provided_msg_text)
+            )
+    #   SUCCESSFUL OUTCOME MESSAGE
+    elif (provided_msg_type == 'SUCCESS'):
+        print(
+            ('   ' * provided_indent_depth + '\033[1;32m[+]\033[1;m ' + provided_msg_text)
+            )
+    #   WARNING MESSAGE
+    elif (provided_msg_type == 'WARNING'):
+        print(
+            ('   ' * provided_indent_depth + '\033[1;33m[!]\033[1;m ' + provided_msg_text)
+            )
+    #   ERROR MESSAGE
+    elif (provided_msg_type == 'ERROR'):
+        print(
+            ('   ' * provided_indent_depth + '\033[1;31m[-]\033[1;m ' + provided_msg_text)
+            )
+    #   NO MATCH => INVALID MESSAGE TYPE
+    else:
+        print_indented_line(0, 'ERROR', 'print_indented_line invalid message type')
+        exit()
+    return
+
+
+################################################################
+# FUNCTIONS - USER INPUT HANDLING (PARSE; VALIDATE; PROCESS)
+################################################################
+
+# [FUNCTION] PARSE USER-PROVIDED INPUT
+def parse_user_input():
+    # DEFINE COMMAND ARGUMENTS
+    user_input_parser = ArgumentParser(
+        description='Simple Python3 web server with file upload (HTTP POST), authentication (HTTP Basic), encryption (TLS) and access restriction (IP; HTTP) functionalities',
+        add_help=True
+        )
+    #   SPECIFY LOCAL NETWORK INTERFACE
+    user_input_parser.add_argument(
+        '-i', '--interface', metavar='LOCAL_IFACE_IP',
+        dest='local_net_iface', type=str, nargs=1,
+        help='Use specified IP address of local network interface as web server listening interface (default: any/all)',
+        default=''
+        )
+    #   SPECIFY LISTENING TCP PORT
+    user_input_parser.add_argument(
+        '-p', '--port', metavar='PORT',
+        dest='list_port', type=int, nargs=1,
+        help='Use specified port as web server listening port (TCP; default: 443)',
+        default=443
+        )
+    #   SPECIFY CREDENTIALS (HTTP BASIC AUTHENTICATION)
+    user_input_parser.add_argument(
+        '-up', '--user-pass', metavar='USERNAME:PASSWORD',
+        dest='username_password', type=str, nargs=1,
+        help='Use specified credentials for client authentication (HTTP basic)'
+        )
+    #   DISABLE HTTP BASIC AUTHENTICATION
+    user_input_parser.add_argument(
+        '-da', '--disable-authn',
+        dest='disable_authn',
+        help='Disable client authentication (HTTP basic; default: enabled)',
+        action='store_true'
+        )
+    #   SPECIFY SERVER-SIDE X.509 CERTIFICATE
+    user_input_parser.add_argument(
+        '-c', '--x509-cert', metavar='X509_CERT_PATH',
+        dest='x509_cert_path', type=str, nargs=1,
+        help='Use specified server-side X.509 certificate for web server authentication and encrypted communication (PEM; TLS v1.2)'
+        )
+    #   SPECIFY COMMON NAME OF AUTOGENERATED (TEMPORARY) SERVER-SIDE X.509 CERTIFICATE
+    user_input_parser.add_argument(
+        '-cn', '--temp-x509-cn', metavar='TEMP_X509_CN',
+        dest='temp_x509_cn', type=str, nargs=1,
+        help='Use specified Common Name (CN) for autogenerated (temporary) server-side X.509 certificate for web server authentication and encrypted communication (PEM; TLS v1.2; default: OS hostname)'
+        )
+    #   DISABLE TLS ENCRYPTION
+    user_input_parser.add_argument(
+        '-de', '--disable-encr',
+        dest='disable_encr',
+        help='Disable web server authentication and encrypted communication (TLS v1.2; default: enabled)',
+        action='store_true'
+        )
+    #   SPECIFY WEB ROOT DIRECTORY
+    user_input_parser.add_argument(
+        '-w', '--web-root-dir', metavar='WEB_ROOT_PATH',
+        dest='web_root_dir', type=str, nargs=1,
+        help='Use specified directory as web server web root directory (default: current directory)',
+        default=getcwd()
+        )
+    #   DISABLE FILE MD5 CHECKSUMS
+    user_input_parser.add_argument(
+        '-dc', '--disable-chksm',
+        dest='disable_chksm',
+        help='Disable web server side file checksums (MD5; default: enabled)',
+        action='store_true'
+        )
+    #   SPECIFY ALLOWED CLIENT IP ADDRESS(ES)
+    user_input_parser.add_argument(
+        '-a', '--allow-access', metavar='CLIENT_IP_ADDR',
+        dest='allowed_client_IPs_list', type=str, nargs=1,
+        help='Allow only specified IP address(es) to access web server (comma separated list; default: any/all)',
+        default='0.0.0.0'
+        )
+    #   DISABLE IPTABLES ACCESS RESTRICTION
+    user_input_parser.add_argument(
+        '-di', '--disable-IP-fw',
+        dest='disable_IP_fw',
+        help='Disable IP layer access restriction (iptables; default:enabled)',
+        action='store_true'
+        )
+    #   DISABLE HTTP ACCESS RESTRICTION
+    user_input_parser.add_argument(
+        '-dh', '--disable-app-fw',
+        dest='disable_app_fw',
+        help='Disable application layer access restriction (HTTP; default:enabled)',
+        action='store_true'
+        )
+    #   DISPLAY PROGRAM VERSION INFORMATION
+    user_input_parser.add_argument(
+        '-v', '--version',
+        dest='version',
+        help='Display version information',
+        action='version',
+        version=('%(prog)s v' + __version__ + ', by ' + __author__ + ', ' + __year__)
+        )
+
+    return user_input_parser
+
+
+# [FUNCTION] RUN PROVIDED OS COMMAND
+def run_OS_cmd(
+        provided_OS_cmd_list, provided_err_msg_text, provided_err_msg_indent,
+        provided_exit_msg_indent
+        ):
+    try:
+        cmd_exec_status = run(provided_OS_cmd_list, stdout=DEVNULL, stderr=DEVNULL)
+    except CalledProcessError:
+        print_indented_line(
+            provided_err_msg_indent, 'ERROR',
+            provided_err_msg_text
+            )
+        exit()
+    except KeyboardInterrupt:
+        print()
+        print_indented_line(
+            provided_exit_msg_indent, 'INFO',
+            'Exiting'
+            )
+        exit()
+    return cmd_exec_status
+
+
+# [FUNCTION] GENERATE RANDOM STRING OF PROVIDED LENGTH
+def gen_rnd_str(provided_random_string_length):
+    # CHECK IF INTEGER
+    if (
+            not isinstance(
+                provided_random_string_length,
+                int
+                )
+            ):
+        return None
+    # CHECK IF LENGTH LESS THAN 10
+    if (provided_random_string_length < 10):
+        return None
+    # POSSIBLE CHARACTERS: ASCII LETTERS (LOWERCASE, UPPERCASE); DIGITS (0-9)
+    random_string_characters = (ascii_letters + digits)
+    return ''.join(
+        choice(random_string_characters) for counter in range(
+            provided_random_string_length
+            )
+        )
+
+
+# [FUNCTION] VALIDATE USER-PROVIDED INPUT
+def val_user_input(user_input_parser):
+    # ALLOW MODIFICATION OF GLOBAL VARIABLES
+    global final_authn_disa
+    global final_encr_disa
+    global final_base64_enc_username_password
+    global final_username
+    global final_password
+    global final_local_net_iface
+    global user_local_net_iface
+    global final_list_port
+    global user_list_port
+    global final_openssl_bin_full_path
+    global final_openssl_bin_full_path_found
+    global final_iptables_bin_full_path
+    global final_iptables_bin_full_path_found
+    global final_x509_cert_full_path
+    global final_temp_x509_cert_subj_full
+    global final_web_root_dir_full_path
+    global final_file_md5_chksm_disa
+    global final_IP_acc_restr_disa
+    global final_app_acc_restr_disa
+    global final_allowed_client_IPs_list
+
+
+    # [FUNCTION] CHECK IF PROVIDED VARIABLE IS OF PROVIDED VARIABLE TYPE
+    def is_var_prov_type(provided_var, provided_var_type, provided_err_msg):
+        # PROVIDED VARIABLE IS NOT OF PROVIDED VARIABLE TYPE
+        if (
+                not isinstance(
+                    provided_var,
+                    provided_var_type
+                    )
+                ):
+            user_input_parser.error(provided_err_msg)
+        # PROVIDED VARIABLE IS OF PROVIDED VARIABLE TYPE
+        return True
+
+
+    # [FUNCTION] CHECK IF PROVIDED IP ADDRESS ASSIGNED TO ANY LOCAL NETWORK INTERFACE
+    def is_local_net_iface_IP_addr(provided_IP_addr):
+        # GET NAMES OF ALL LOCAL NETWORK INTERFACES
+        local_net_iface_names_list = listdir('/sys/class/net/')
+        # LOOP ALL IDENTIFIED LOCAL NETWORK INTERFACE NAMES
+        for iface_name in local_net_iface_names_list:
+            temp_socket = socket(AF_INET, SOCK_DGRAM)
+            # PROVIDED IP ADDRESS IS VALID (I.E. ASSIGNED TO A LOCAL NETWORK INTERFACE)
+            if (
+                    provided_IP_addr == inet_ntoa(
+                        ioctl(
+                            temp_socket.fileno(),
+                            0x8915,
+                            pack(
+                                '256s',
+                                iface_name[:15].encode('utf-8')
+                                )
+                            )[20:24]
+                        )
+                    ):
+                return True
+        # PROVIDED IP ADDRESS IS INVALID (I.E. NOT ASSIGNED TO ANY LOCAL NETWORK INTERFACE)
+        return False
+
+
+    # [FUNCTION] VALIDATE PROVIDED LOCAL NETWORK INTERFACE IP ADDRESS
+    def val_IP_addr_local_net_iface(provided_IP_addr, provided_err_msg):
+        # PROVIDED LOCAL NETWORK INTERFACE IP ADDRESS IS NOT STRING
+        is_var_prov_type(provided_IP_addr, str, provided_err_msg)
+        # PROVIDED LOCAL NETWORK INTERFACE IP ADDRESS IS STRING
+        #   PROVIDED IP ADDRESS IS NOT LOCAL NETWORK INTERFACE IP ADDRESS
+        if (not is_local_net_iface_IP_addr(provided_IP_addr)):
+            user_input_parser.error(provided_err_msg)
+        #   PROVIDED IP ADDRESS IS LOCAL NETWORK INTERFACE IP ADDRESS
+        return provided_IP_addr
+
+
+    # [FUNCTION] VALIDATE PROVIDED PORT
+    def val_port(provided_port, provided_err_msg):
+        # PROVIDED PORT IS NOT INTEGER
+        is_var_prov_type(provided_port, int, provided_err_msg)
+        # PROVIDED PORT IS INTEGER
+        #   PROVIDE PORT OUT OF BOUNDARIES
+        if ((int(provided_port) < 1) or (int(provided_port) > 65535)):
+            user_input_parser.error(provided_err_msg)
+        #   PROVIDED PORT VALID
+        return provided_port
+
+
+    # [FUNCTION] CHECK IF PROVIDED TCP SOCKET (ALREADY) BEING USED
+    def is_TCP_socket_used(provided_local_net_iface, provided_list_port):
+        try:
+            HTTPServer(
+                (
+                    provided_local_net_iface,
+                    provided_list_port
+                    ),
+                SimpleHTTPRequestHandlerWithUploadAuthentication
+                )
+        except OSError:
+            # ERROR => TCP SOCKET BEING USED
+            return True
+        # NO ERROR => TCP SOCKET NOT BEING USED
+        return False
+
+
+    # [FUNCTION] COUNT SEMICOLON OCCURENCES IN PROVIDED STRING
+    def count_semicolons(provided_string):
+        return len(
+            [
+                char.start() for char in finditer(
+                    ':',
+                    str(provided_string)
+                    )
+                ]
+            )
+
+
+    # [FUNCTION] SPLIT PROVIDED HTTP BASIC AUTHENTICATION CREDENTIALS
+    def split_HTTP_basic_authn_creds(provided_string):
+        username = provided_string.split(':')[0]
+        password = provided_string.split(':')[1]
+        return username, password
+
+
+    # [FUNCTION] VALIDATE PROVIDED USER CREDENTIALS
+    def val_username_password(provided_username_password, provided_err_msg):
+        # ALLOW MODIFICATION OF GLOBAL VARIABLES
+        global final_username
+        global final_password
+
+        # PROVIDED USER CREDENTIALS IS NOT STRING
+        is_var_prov_type(provided_username_password, str, provided_err_msg)
+        # HARDCODED HTTP BASIC AUTHENTICATION REALM IS NOT STRING
+        is_var_prov_type(hardcoded_basic_HTTP_authn_realm, str, 'hardcoded HTTP basic authentication realm requires string containing value')
+        # PROVIDED USER CREDENTIALS IS STRING + HARDCODED HTTP BASIC AUTHENTICATION REALM IS STRING
+        #   CREDENTIALS USE INVALID FORMAT
+        if (count_semicolons(provided_username_password) != 1):
+            user_input_parser.error(provided_err_msg)
+        #   CREDENTIALS USE VALID FORMAT
+        #     SPLIT CREDENTIALS INTO USERNAME AND PASSWORD
+        final_username, final_password = split_HTTP_basic_authn_creds(provided_username_password)
+        #     BASE64-ENCODE USER PROVIDED CREDENTIALS
+        return (
+            b64encode(
+                provided_username_password.encode()
+                )
+            ).decode()
+
+
+    # [FUNCTION] ATTEMPT TO DETERMINE FULL PATH TO PROVIDED FILENAME OF (LOCAL) BINARY
+    def try_find_bin_full_path(provided_bin_filename):
+        # ATTEMPT TO DETERMINE FULL PATH TO PROVIDED FILENAME OF (LOCAL) BINARY
+        try:
+            temp_bin_full_path = (
+                check_output(
+                    [
+                        hardcoded_which_bin_full_path,
+                        provided_bin_filename
+                        ],
+                    stderr=open('/dev/null', 'w')
+                    )
+                ).decode('utf-8').strip('\n')
+        except CalledProcessError:
+            print_indented_line(
+                0, 'ERROR',
+                ('Can not find "%s" binary' % provided_bin_filename)
+                )
+            exit()
+        # FULL PATH TO BINARY FOUND
+        return temp_bin_full_path
+
+
+    # [FUNCTION] CHECK IF PROVIDED FULL PATH TO FILE IS PROVIDED BINARY
+    def is_full_path_prov_bin(provided_full_path_to_file, provided_cli_bin_id_text, provided_cli_ver_arg):
+        # PROVIDED FILE DOES NOT EXIST
+        if (not path.isfile(provided_full_path_to_file)):
+            return False
+        # PROVIDED FILE DOES EXIST
+        try:
+            bin_exec_status = (
+                provided_cli_bin_id_text in (
+                    check_output(
+                        [
+                            provided_full_path_to_file,
+                            provided_cli_ver_arg
+                            ],
+                        stderr=open('/dev/null', 'w')
+                        )
+                    ).decode('utf-8').strip('\n')
+                )
+        except OSError:
+            # FILE EXECUTION ERROR
+            return False
+        except CalledProcessError as err:
+            # NON-ZERO EXIT STATUS
+            return False
+
+        # FILE EXECUTED SUCCESSFULLY
+        return bin_exec_status
+
+
+    # [FUNCTION] CHECK IF PROVIDED FULL PATH TO FILE IS 'OPENSSL' BINARY
+    def is_full_path_openssl_bin(provided_full_path_to_file):
+        return (
+            is_full_path_prov_bin(
+                provided_full_path_to_file, 'OpenSSL ', 'version'
+                )
+            )
+
+
+    # [FUNCTION] CHECK IF PROVIDED FULL PATH TO FILE IS 'IPTABLES' BINARY
+    def is_full_path_iptables_bin(provided_full_path_to_file):
+        return (
+            is_full_path_prov_bin(
+                provided_full_path_to_file, 'iptables v', '--version'
+                )
+            )
+
+
+    # [FUNCTION] CHECK IF PROVIDED FULL PATH TO FILE IS 'WHICH' BINARY
+    def is_full_path_which_bin(provided_full_path_to_file):
+        return (
+            is_full_path_prov_bin(
+                provided_full_path_to_file, 'which', 'which'
+                )
+            )
+
+
+    # [FUNCTION] VALIDATE PROVIDED PATH TO PROVIDED LOCAL BINARY NAME
+    def val_bin(provided_bin_name, provided_file_full_path, provided_err_msg):
+        # PROVIDED BINARY NAME = 'IPTABLES'
+        if provided_bin_name == 'iptables':
+            function_to_call = is_full_path_iptables_bin
+        # PROVIDED BINARY NAME = 'OPENSSL'
+        elif provided_bin_name == 'openssl':
+            function_to_call = is_full_path_openssl_bin
+        # PROVIDED BINARY NAME = 'WHICH'
+        elif provided_bin_name == 'which':
+            function_to_call = is_full_path_which_bin
+        # INVALID/UNSUPPORTED PROVIDED BINARY NAME
+        else:
+            print_indented_line(0, 'ERROR', 'val_bin invalid binary name')
+            exit()
+
+        # PROVIDED PATH TO PROVIDED LOCAL BINARY NAME IS NOT STRING
+        is_var_prov_type(provided_file_full_path, str, provided_err_msg)
+        # PROVIDED PATH TO PROVIDED LOCAL BINARY NAME IS STRING
+        #   PROVIDED BINARY NAME NOT AVAILABLE AT PROVIDED PATH TO LOCAL FILE
+        if (not function_to_call(provided_file_full_path)):
+            user_input_parser.error(provided_err_msg)
+        #   PROVIDED BINARY NAME AVAILABLE AT PROVIDED PATH TO LOCAL FILE
+        return provided_file_full_path
+
+
+    # [FUNCTION] CHECK IF PROVIDED FULL PATH TO FILE IS X.509 CERTIFICATE
+    def is_valid_x509_cert_PEM(provided_full_path_to_openssl_bin, provided_full_path_to_x509_cert):
+        command_exec_status = run_OS_cmd(
+            [
+                provided_full_path_to_openssl_bin, 'x509', '-in',
+                provided_full_path_to_x509_cert, '-inform', 'PEM',
+                '-noout', '-text'
+                ],
+            'is_valid_x509_cert_PEM OS command execution error', 0, 0
+            )
+        # COMMAND EXECUTED WITH ERRORS
+        if (command_exec_status.returncode == 1):
+            return False
+        # COMMAND EXECUTED WITH NO ERRORS
+        return True
+
+
+    # [FUNCTION] VALIDATE PROVIDED PATH TO LOCAL X.509 CERTIFICATE FILE
+    def val_x509_cert(provided_file_full_path, provided_err_msg):
+        # PROVIDED PATH TO LOCAL X.509 CERTIFICATE FILE IS NOT STRING
+        is_var_prov_type(provided_file_full_path, str, provided_err_msg)
+        # PROVIDED PATH TO LOCAL X.509 CERTIFICATE FILE IS STRING
+        #   PROVIDED PATH TO LOCAL FILE IS NOT FILE
+        if (not path.isfile(provided_file_full_path)):
+            user_input_parser.error(provided_err_msg)
+
+        #   PROVIDED PATH TO LOCAL FILE IS NOT VALID X.509 CERTIFICATE
+        if (
+                not is_valid_x509_cert_PEM(
+                    final_openssl_bin_full_path,
+                    provided_file_full_path
+                    )
+                ):
+            user_input_parser.error(provided_err_msg)
+        #   PROVIDED PATH TO LOCAL FILE IS VALID X.509 CERTIFICATE
+        return provided_file_full_path
+
+
+    # [FUNCTION] VALIDATE PROVIDED X.509 CERTIFICATE SUBJECT DATA
+    def val_x509_subj(provided_x509_subj, provided_err_msg):
+        # PROVIDED X.509 CERTIFICATE SUBJECT DATA IS NOT STRING
+        is_var_prov_type(provided_x509_subj, str, provided_err_msg)
+        # PROVIDED X.509 CERTIFICATE SUBJECT DATA IS STRING
+        #   ATTEMPT TO PARSE PROVIDED X.509 CERTIFICATE SUBJECT DATA
+        x509_subj_list = findall(
+            r'/C=(.*)/ST=(.*)/L=(.*)/O=(.*)/OU=(.*)/CN=(.*)',
+            provided_x509_subj
+            )
+        #   PROVIDED X.509 CERTIFICATE SUBJECT DATA IS NOT VALID
+        if (not x509_subj_list):
+            user_input_parser.error(provided_err_msg)
+        #   PROVIDED X.509 CERTIFICATE SUBJECT DATA IS VALID
+        return provided_x509_subj
+
+
+    # [FUNCTION] VALIDATE PROVIDED X.509 CERTIFICATE COMMON NAME
+    def val_x509_cn(provided_x509_cn, provided_err_msg):
+        # PROVIDED X.509 CERTIFICATE COMMON NAME IS NOT STRING
+        is_var_prov_type(provided_x509_cn, str, provided_err_msg)
+        # PROVIDED X.509 CERTIFICATE COMMON NAME IS STRING
+        return provided_x509_cn
+
+
+    # [FUNCTION] VALIDATE DATA REQUIRED TO AUTOGENERATE (TEMPORARY) X.509 CERTIFICATE
+    def val_temp_x509_data(provided_temp_x509_cn):
+        # VALIDATE HARDCODED X.509 CERTIFICATE SUBJECT DATA (REQUIRED BY AUTOGENERATE CERTIFICATE FUNCTIONALITY)
+        temp_x509_cert_subj_full = val_x509_subj(
+            hardcoded_temp_x509_cert_subj,
+            'hardcoded subject data of temporary X.509 certificate requires string containing valid data ("/C=.../ST=.../L=.../O=.../OU=.../CN=")'
+            )
+
+        # USER DID PROVIDE COMMON NAME FOR AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE VIA CLI
+        if (
+                isinstance(
+                    provided_temp_x509_cn,
+                    list
+                    )
+                ):
+            # VALIDATE COMMON NAME PROVIDED VIA CLI
+            #   NOTE: APPENDS VALID CN TO VALID SUBJECT DATA
+            temp_x509_cert_subj_full += val_x509_cn(
+                provided_temp_x509_cn[0],
+                '"--temp-x509-cn" argument requires (arbitrary) hostname or IP address of local network interface'
+                )
+        # USER DID NOT PROVIDE COMMON NAME FOR AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE VIA CLI
+        #   HARDCODED COMMON NAME FOR AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE DOES EXIST
+        elif (hardcoded_temp_x509_cert_CN or (hardcoded_temp_x509_cert_CN == 0)):
+            # VALIDATE HARDCODED COMMON NAME FOR AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE
+            #   NOTE: APPENDS VALID CN TO VALID SUBJECT DATA
+            temp_x509_cert_subj_full += val_x509_cn(
+                hardcoded_temp_x509_cert_CN,
+                'hardcoded Common Name of temporary X.509 certificate requires string containing data (hostname or IP address of local network interface)'
+                )
+        #   HARDCODED COMMON NAME FOR AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE DOES NOT EXIST => USE PREDEFINED (DEFAULT) VALUE
+        else:
+            # USE PREDEFINED (DEFAULT) COMMON NAME VALUE FOR AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE
+            #   ATTEMPT TO DETERMINE PATH TO LOCAL 'HOSTNAME' BINARY
+            temp_hostname_bin_full_path = try_find_bin_full_path('hostname')
+            #   USE HOSTNAME OF UNDERLYING OPERATING SYSTEM AS COMMON NAME FOR AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE
+            temp_x509_cert_subj_full += gethostname()
+
+        # VALID FULL SUBJECT NAME
+        return temp_x509_cert_subj_full
+
+
+    # [FUNCTION] VALIDATE PROVIDED DIRECTORY
+    def val_dir(provided_dir_full_path, provided_err_msg):
+        # PROVIDED DIRECTORY IS NOT STRING
+        is_var_prov_type(provided_dir_full_path, str, provided_err_msg)
+        # PROVIDED DIRECTORY IS STRING
+        #   PROVIDED PATH TO DIRECTORY DOES NOT EXIST
+        if (not path.isdir(provided_dir_full_path)):
+            user_input_parser.error(provided_err_msg)
+        #   PROVIDED PATH TO DIRECTORY DOES EXIST
+        #     PATH EQUAL TO DOT CHARACTER
+        elif (provided_dir_full_path == '.'):
+            return getcwd()
+        #     VALID FULL PATH
+        else:
+            return provided_dir_full_path
+
+
+    # [FUNCTION] CHECK IF PROVIDED STRING IS IP ADDRESS
+    def is_str_IP_addr(provided_str):
+        # [FUNCTION] VERIFY LIST OF PROVIDED IP ADDRESS OCTETS
+        def vrfy_IP_addr_octets(provided_IP_addr_octet_list):
+            for octet in provided_IP_addr_octet_list:
+                # OCTET IS NUMERIC AND OF VALID VALUD
+                if (octet.isnumeric() and int(octet)>=0 and int(octet)<=255):
+                    pass
+                # OCTET INVALID
+                else:
+                    return False
+            return True
+
+        # INITIALIZE DEFAULT RETURN VALUE
+        is_str_IP_addr = False
+        # DOT CHARACTER PRESENT IN PROVIDED STRING
+        if ('.' in provided_str):
+            # SPLIT PROVIDED STRING BY DOT CHARACTER
+            provided_str_octets_list = (provided_str.strip().split('.'))
+            # FOUR OCTETS PRESENT IN PROVIDED STRING
+            if(len(provided_str_octets_list) == 4):
+                # LOOP IDENTIFIED OCTETS
+                is_str_IP_addr = vrfy_IP_addr_octets(provided_str_octets_list)
+        return is_str_IP_addr
+
+
+    # [FUNCTION] CHECK VALIDITY OF PROVIDED STRING OF IP ADDRESS(ES)
+    def does_str_contain_IPs(provided_str_of_IPs):
+        # SPLIT PROVIDED STRING BY COMMA
+        provided_IPs_list = (provided_str_of_IPs.split(','))
+        # LOOP THROUGH ALL CHUNKS OF PROVIDED STRING
+        for client_IP in provided_IPs_list:
+            # CHUNK NOT IP ADDRESS
+            if (not is_str_IP_addr(client_IP)):
+                return False
+        # ALL CHUNKS OF PROVIDED STRING ARE IP ADDRESS(ES)
+        return True
+
+
+    # [FUNCTION] VALIDATE PROVIDED LIST OF IP ADDRESS(ES)
+    def val_IPs_list(provided_IPs_list, provided_err_msg):
+        # PROVIDED LIST OF IP ADDRESS(ES) IS NOT STRING
+        is_var_prov_type(provided_IPs_list, str, provided_err_msg)
+        # PROVIDED LIST OF IP ADDRESS(ES) IS STRING
+        #   PROVIDED LIST OF IP ADDRESS(ES) CONTAINS SPACE CHARACTER(S)
+        if (' ' in provided_IPs_list):
+            user_input_parser.error(provided_err_msg)
+        #   PROVIDED LIST OF IP ADDRESS(ES) CONTAINS INVALID IP ADDRESS(ES)
+        elif (not does_str_contain_IPs(provided_IPs_list)):
+            user_input_parser.error(provided_err_msg)
+        #   PROVIDED LIST OF IP ADDRESS(ES) CONTAINS NO SPACE CHARACTER(S) AND VALID IP ADDRESS(ES)
+        return provided_IPs_list.split(',')
+
+
+    # [FUNCTION] VALIDATE LIST OF ALLOWED CLIENT IP ADDRESS(ES)
+    def val_allowed_client_IPs(provided_arguments):
+        # ALLOW MODIFICATION OF GLOBAL VARIABLES
+        global final_allowed_client_IPs_list
+
+        #### ALLOWED CLIENT IP ADDRESS(ES)
+        # USER DID PROVIDE (LIST OF) ALLOWED CLIENT IP(S) VIA CLI
+        if (
+                not isinstance(
+                    provided_arguments.allowed_client_IPs_list,
+                    str
+                    )
+                ):
+            # VALIDATE PROVIDED LIST OF CLIENT IP ADDRESS(ES)
+            final_allowed_client_IPs_list = val_IPs_list(
+                provided_arguments.allowed_client_IPs_list[0],
+                '"--allow-access" argument requires (comma separated list) of valid IP address(es)'
+                )
+        # USER DID NOT PROVIDE (LIST OF) ALLOWED CLIENT IP(S) VIA CLI
+        #   HARDCODED (LIST OF) ALLOWED CLIENT IP(S) DOES EXIST
+        elif (hardcoded_allowed_client_IPs or (hardcoded_allowed_client_IPs == 0)):
+            # VALIDATE HARDCODED LIST OF CLIENT IP ADDRESS(ES)
+            final_allowed_client_IPs_list = val_IPs_list(
+                hardcoded_allowed_client_IPs,
+                'hardcoded list of allowed clients requires string containing (comma separated list) of valid IP address(es)'
+                )
+        #   HARDCODED (LIST OF) ALLOWED CLIENT IP(S) DOES NOT EXIST => USE PREDEFINED (DEFAULT) VALUE
+        else:
+            # USE PREDEFINED (DEFAULT) ALLOWED CLIENT IP VALUE
+            final_allowed_client_IPs_list = ['0.0.0.0']
+
+
+    # PARSE USER-PROVIDED INPUT
+    provided_arguments = (user_input_parser.parse_args())
+
+    # VALIDATE HARDCODED PATH TO LOCAL 'WHICH' BINARY
+    val_bin(
+        'which', hardcoded_which_bin_full_path,
+        'hardcoded path to "which" file not "which" binary'
+        )
+
+    #### NETWORK INTERFACE
+    # USER DID PROVIDE IP ADDRESS OF LOCAL NETWORK INTERFACE VIA CLI
+    if (
+            not isinstance(
+                provided_arguments.local_net_iface,
+                str
+                )
+            ):
+        # VALIDATE IP ADDRESS OF LOCAL NETWORK INTERFACE
+        final_local_net_iface = user_local_net_iface = val_IP_addr_local_net_iface(
+            provided_arguments.local_net_iface[0],
+            '"--interface" argument requires IP address of local network interface'
+            )
+    # USER DID NOT PROVIDE IP ADDRESS OF LOCAL NETWORK INTERFACE VIA CLI
+    #   HARDCODED LOCAL NETWORK INTERFACE EXISTS
+    elif (hardcoded_local_net_iface or (hardcoded_local_net_iface == 0)):
+        # VALIDATE IP ADDRESS OF LOCAL NETWORK INTERFACE
+        final_local_net_iface = val_IP_addr_local_net_iface(
+            hardcoded_local_net_iface,
+            'hardcoded local network interface variable requires string containing value of IP address of local network interface'
+            )
+    #   HARDCODED IP ADDRESS OF LOCAL NETWORK INTERFACE DOES NOT EXIST => USE PREDEFINED (DEFAULT) VALUE
+    else:
+        # USE PREDEFINED (DEFAULT) VALUE FOR IP ADDRESS OF LOCAL NETWORK INTERFACE
+        final_local_net_iface = '0.0.0.0'
+
+    #### LISTENING PORT
+    # USER DID PROVIDE LISTENING PORT VIA CLI
+    if (
+            not isinstance(
+                provided_arguments.list_port,
+                int
+                )
+            ):
+        # VALIDATE PORT
+        final_list_port = user_list_port = val_port(
+            provided_arguments.list_port[0],
+            '"--port" argument requires value within range [1-65535]'
+            )
+    # USER DID NOT PROVIDE LISTENING PORT VIA CLI
+    #   HARDCODED LISTENING PORT EXISTS
+    elif (hardcoded_list_port or (hardcoded_list_port == 0)):
+        # VALIDATE PORT
+        final_list_port = val_port(
+            hardcoded_list_port,
+            'hardcoded listening port variable requires integer containing value within range [1-65535]'
+            )
+    #   HARDCODED LISTENING PORT DOES NOT EXIST => USE PREDEFINED (DEFAULT) VALUE
+    else:
+        # USE PREDEFINED (DEFAULT) VALUE FOR LISTENING PORT
+        final_list_port = 443
+
+    # PORT/TCP SOCKET BEING USED
+    if (
+            is_TCP_socket_used(
+                final_local_net_iface,
+                final_list_port
+                )
+            ):
+        user_input_parser.error('specified TCP socket already being used - change local network interface / listening port value(s)')
+
+    #### AUTHENTICATION
+    # HTTP BASIC AUTHENTICATION DISABLED
+    if (hardcoded_authn_disa or provided_arguments.disable_authn):
+        # [OPTION] HARDCODED DISABLE BASIC AUTHENTICATION IS NOT BOOLEAN
+        #   USER DID NOT PROVIDE ARGUMENT
+        if (not provided_arguments.disable_authn):
+            is_var_prov_type(hardcoded_authn_disa, bool, 'hardcoded disabled authentication variable requires boolean value')
+        # [OPTION] HARDCODED DISABLE BASIC AUTHENTICATION IS BOOLEAN
+        # [OPTION] USER DID PROVIDE ARGUMENT
+        final_authn_disa = True
+
+        # USER DID PROVIDE CREDENTIALS VIA CLI
+        if provided_arguments.username_password != None:
+            user_input_parser.error('"--user-pass" argument not required with disabled HTTP basic authentication')
+    # HTTP BASIC AUTHENTICATION NOT DISABLED (I.E. ENABLED)
+    else:
+        # USER DID PROVIDE CREDENTIALS VIA CLI
+        if provided_arguments.username_password:
+            # VALIDATE PROVIDED USER CREDENTIALS
+            final_base64_enc_username_password = val_username_password(
+                provided_arguments.username_password[0],
+                '"--user-pass" argument value uses "USERNAME:PASSWORD" format'
+                )
+        # USER DID NOT PROVIDE CREDENTIALS VIA CLI
+        #   HARDCODED CREDENTIALS DO EXIST
+        elif (hardcoded_http_basic_authn_username_password or (hardcoded_http_basic_authn_username_password == 0)):
+            # VALIDATE HARDCODED USER CREDENTIALS
+            final_base64_enc_username_password = val_username_password(
+                hardcoded_http_basic_authn_username_password,
+                'hardcoded credentials variable requires string containing value in "USERNAME:PASSWORD" format'
+                )
+        #   HARDCODED CREDENTIALS DO NOT EXIST => AUTOGENERATE TEMPORARY CREDENTIALS
+        else:
+            # AUTOGENERATE TEMPORARY CREDENTIALS
+            final_username = gen_rnd_str(10)
+            final_password = gen_rnd_str(20)
+            # BASE64-ENCODE GENERATED TEMPORARY CREDENTIALS
+            final_base64_enc_username_password = (
+                b64encode(
+                    (
+                        final_username
+                        + ":"
+                        + final_password
+                        ).encode()
+                    )
+                ).decode()
+
+    #### ENCRYPTION
+    # ENCRYPTION (TLS) DISABLED
+    if (hardcoded_encr_disa or provided_arguments.disable_encr):
+        # [OPTION] HARDCODED DISABLE ENCRYPTION IS NOT BOOLEAN
+        #   USER DID NOT PROVIDE ARGUMENT
+        if (not provided_arguments.disable_encr):
+            is_var_prov_type(hardcoded_encr_disa, bool, 'hardcoded disabled encryption variable requires boolean value')
+        # [OPTION] HARDCODED DISABLE ENCRYPTION IS BOOLEAN
+        # [OPTION] USER DID PROVIDE ARGUMENT
+        final_encr_disa = True
+
+        # USER DID PROVIDE X.509 CERTIFICATE PATH VIA CLI
+        if provided_arguments.x509_cert_path:
+            user_input_parser.error('"--cert" argument not required with disabled TLS encryption')
+        # USER DID PROVIDE COMMON NAME FOR AUTOGENERATED (TEMPORARY) SERVER-SIDE X.509 CERTIFICATE VIA CLI
+        if provided_arguments.temp_x509_cn:
+            user_input_parser.error('"--temp-x509-cn" argument not required with disabled TLS encryption')
+    # ENCRYPTION (TLS) ENABLED
+    else:
+        # PATH TO 'OPENSSL' BINARY IS NOT HARDCODED
+        if (not hardcoded_openssl_bin_full_path):
+            # ATTEMPT TO DETERMINE PATH TO LOCAL 'OPENSSL' BINARY
+            temp_openssl_bin_full_path = try_find_bin_full_path('openssl')
+            # VALIDATE IDENTIFIED PATH TO LOCAL 'OPENSSL' BINARY
+            final_openssl_bin_full_path = final_openssl_bin_full_path_found = val_bin(
+                'openssl', temp_openssl_bin_full_path,
+                'identified path to "OpenSSL" file not "OpenSSL" binary'
+                )
+        # PATH TO 'OPENSSL' BINARY IS HARDCODED
+        else:
+            # VALIDATE HARDCODED PATH TO LOCAL 'OPENSSL' BINARY
+            final_openssl_bin_full_path = val_bin(
+                'openssl', hardcoded_openssl_bin_full_path,
+                'hardcoded path to "OpenSSL" file requires string containing path to existing valid "OpenSSL" binary'
+                )
+
+        # USER DID PROVIDE PATH TO X.509 CERTIFICATE VIA CLI
+        if provided_arguments.x509_cert_path:
+            # VALIDATE PROVIDED PATH TO LOCAL X.509 CERTIFICATE FILE
+            final_x509_cert_full_path = val_x509_cert(
+                provided_arguments.x509_cert_path[0],
+                '"--cert" argument requires path to existing valid X.509 certificate (PEM)'
+                )
+            # USER DID PROVIDE COMMON NAME FOR AUTOGENERATED (TEMPORARY) SERVER-SIDE X.509 CERTIFICATE VIA CLI
+            if provided_arguments.temp_x509_cn:
+                user_input_parser.error('"--temp-x509-cn" argument not required with specified X.509 certificate')
+        # USER DID NOT PROVIDE PATH TO X.509 CERTIFICATE VIA CLI
+        #   PATH TO X.509 CERTIFICATE HARDCODED
+        elif (hardcoded_x509_cert_full_path or (hardcoded_x509_cert_full_path == 0)):
+            # VALIDATE HARDCODED PATH TO LOCAL X.509 CERTIFICATE FILE
+            final_x509_cert_full_path = val_x509_cert(
+                hardcoded_x509_cert_full_path,
+                'hardcoded path to X.509 certificate variable requires string containing path to existing valid X.509 certificate (PEM)'
+                )
+            # USER DID PROVIDE COMMON NAME FOR AUTOGENERATED (TEMPORARY) SERVER-SIDE X.509 CERTIFICATE VIA CLI
+            if provided_arguments.temp_x509_cn:
+                user_input_parser.error('"--temp-x509-cn" argument not required with hardcoded X.509 certificate')
+        #   PATH TO X.509 CERTIFICATE NOT HARDCODED => AUTOGENERATE TEMPORARY X.509 CERTIFICATE
+        else:
+            # VALIDATE DATA REQUIRED TO AUTOGENERATE TEMPORARY X.509 CERTIFICATE
+            final_temp_x509_cert_subj_full = val_temp_x509_data(provided_arguments.temp_x509_cn)
+
+    #### WEB ROOT DIRECTORY
+    # USER DID PROVIDE WEB ROOT DIRECTORY VIA CLI
+    if (
+            not isinstance(
+                provided_arguments.web_root_dir,
+                str
+                )
+            ):
+        # VALIDATE PROVIDED DIRECTORY
+        final_web_root_dir_full_path = val_dir(
+            provided_arguments.web_root_dir[0],
+            '"--web-root-dir" argument requires valid path to existing directory'
+            )
+    # USER DID NOT PROVIDE WEB ROOT DIRECTORY VIA CLI
+    #   HARDCODED PATH TO WEB ROOT DIRECTORY EXISTS
+    elif (hardcoded_web_root_dir_full_path or (hardcoded_web_root_dir_full_path == 0)):
+        # VALIDATE HARDCODED DIRECTORY
+        final_web_root_dir_full_path = val_dir(
+            hardcoded_web_root_dir_full_path,
+            'hardcoded path to web root directory variable requires string containing valid path to existing directory'
+            )
+    #   HARDCODED PATH TO WEB ROOT DIRECTORY DOES NOT EXIST => USE PREDEFINED (DEFAULT) VALUE
+    else:
+        # USE PREDEFINED (DEFAULT) VALUE FOR WEB ROOT DIRECTORY
+        final_web_root_dir_full_path = getcwd()
+
+    #### FILE MD5 CHECKSUMS
+    # FILE MD5 CHECKSUMS DISABLED
+    if (hardcoded_file_md5_chksm_disa or provided_arguments.disable_chksm):
+        # [OPTION] HARDCODED DISABLE FILE MD5 CHECKSUMS IS NOT BOOLEAN
+        #   USER DID NOT PROVIDE ARGUMENT
+        if (not provided_arguments.disable_chksm):
+            is_var_prov_type(hardcoded_file_md5_chksm_disa, bool, 'hardcoded disabled file MD5 checksums variable requires boolean value')
+        # [OPTION] HARDCODED DISABLE FILE MD5 CHECKSUMS IS BOOLEAN
+        # [OPTION] USER DID PROVIDE ARGUMENT
+        final_file_md5_chksm_disa = True
+
+    #### ACCESS RESTRICTION
+    # IPTABLES ACCESS RESTRICTION DISABLED (IP LAYER)
+    if (hardcoded_IP_acc_restr_disa or provided_arguments.disable_IP_fw):
+        # [OPTION] HARDCODED DISABLE IPTABLES ACCESS RESTRICTION IS NOT BOOLEAN
+        #   USER DID NOT PROVIDE ARGUMENT
+        if (not provided_arguments.disable_IP_fw):
+            is_var_prov_type(hardcoded_IP_acc_restr_disa, bool, 'hardcoded disabled iptables access restriction variable requires boolean value')
+        # [OPTION] HARDCODED DISABLE IPTABLES ACCESS RESTRICTION IS BOOLEAN
+        # [OPTION] USER DID PROVIDE ARGUMENT
+        final_IP_acc_restr_disa = True
+
+    # HTTP ACCESS RESTRICTION DISABLED (APPLICATION LAYER)
+    if (hardcoded_app_acc_restr_disa or provided_arguments.disable_app_fw):
+        # [OPTION] HARDCODED DISABLE HTTP ACCESS RESTRICTION IS NOT BOOLEAN
+        #   USER DID NOT PROVIDE ARGUMENT
+        if (not provided_arguments.disable_app_fw):
+            is_var_prov_type(hardcoded_app_acc_restr_disa, bool, 'hardcoded disabled HTTP access restriction variable requires boolean value')
+        # [OPTION] HARDCODED DISABLE HTTP ACCESS RESTRICTION IS BOOLEAN
+        # [OPTION] USER DID PROVIDE ARGUMENT
+        final_app_acc_restr_disa = True
+
+    # BOTH ACCESS RESTRICTION MECHANISMS DISABLED (IP; APPLICATION)
+    if (final_IP_acc_restr_disa and final_app_acc_restr_disa):
+        # USER DID PROVIDE (LIST OF) ALLOWED CLIENT IP(S) VIA CLI
+        if (
+                not isinstance(
+                    provided_arguments.allowed_client_IPs_list,
+                    str
+                    )
+                ):
+            user_input_parser.error('"--allow-access" argument not required with disabled access restriction')
+        # ALLOW ACCESS TO ANY IP ADDRESS
+        final_allowed_client_IPs_list = ['0.0.0.0']
+
+    # IPTABLES ACCESS RESTRICTION ENABLED (IP LAYER)
+    if (not final_IP_acc_restr_disa):
+        # VALIDATE LIST OF ALLOWED CLIENT IP ADDRESS(ES)
+        val_allowed_client_IPs(provided_arguments)
+
+        # PATH TO 'IPTABLES' BINARY IS NOT HARDCODED
+        if (not hardcoded_iptables_bin_full_path):
+            # ATTEMPT TO DETERMINE PATH TO LOCAL 'IPTABLES' BINARY
+            temp_iptables_bin_full_path = try_find_bin_full_path('iptables')
+            # VALIDATE IDENTIFIED PATH TO LOCAL 'IPTABLES' BINARY
+            final_iptables_bin_full_path = final_iptables_bin_full_path_found = val_bin(
+                'iptables', temp_iptables_bin_full_path,
+                'identified path to "iptables" file not "iptables" binary'
+                )
+        # PATH TO 'IPTABLES' BINARY IS HARDCODED
+        else:
+            # VALIDATE HARDCODED PATH TO LOCAL 'IPTABLES' BINARY
+            final_iptables_bin_full_path = val_bin(
+                'iptables', hardcoded_iptables_bin_full_path,
+                'hardcoded path to "iptables" file requires string containing path to existing valid "iptables" binary'
+                )
+    # IPTABLES ACCESS RESTRICTION DISABLED (IP LAYER) + HTTP ACCESS RESTRICTION ENABLED (APPLICATION LAYER)
+    elif (not final_app_acc_restr_disa):
+        # VALIDATE LIST OF ALLOWED CLIENT IP ADDRESS(ES)
+        val_allowed_client_IPs(provided_arguments)
+
+
+# [FUNCTION] MODIFY (CREATE/DELETE) IPTABLES FIREWALL RULES FOR PROVIDED ALLOWED CLIENT IP ADDRESS(ES)
+def modify_iptables_rules(provided_allowed_client_IPs, provided_allowed_TCP_port, provided_action):
+    # CREATE RULE
+    if (provided_action.lower() == 'create'):
+        iptables_action_switch = 'A'
+        action_message = 'Generated'
+        print_indent = 5
+    # DELETE RULE
+    elif (provided_action.lower() == 'delete'):
+        iptables_action_switch = 'D'
+        action_message = 'Deleted'
+        print_indent = 3
+    # INVALID PROVIDED ACTION
+    else:
+        print_indented_line(
+            2, 'ERROR',
+            'modify_iptables_rules invalid argument'
+            )
+        exit()
+    # ASSEMBLE IPTABLES ACTION SWITCH ARGUMENT
+    iptables_action_switch_arg = ('-' + iptables_action_switch)
+
+    # LOOP ALL PROVIDED ALLOWED CLIENT IP ADDRESSES
+    for allowed_client_IP in provided_allowed_client_IPs:
+        # MODIFY CLIENT IP ADDRESS (ANY IP)
+        if (allowed_client_IP == '0.0.0.0'):
+            # CREATE/DELETE IPTABLES FIREWALL ALLOW RULE - ANY IP ADDRESS
+            run_OS_cmd(
+                [
+                    final_iptables_bin_full_path, iptables_action_switch_arg, 'INPUT',
+                    '-p', 'tcp', '--dport',
+                    str(provided_allowed_TCP_port), '-j', 'ACCEPT',
+                    '-s', '0.0.0.0/0'
+                    ],
+                'modify_iptables_rules OS command execution error (allow any)', 4, 2
+                )
+        # DO NOT MODIFY CLIENT IP ADDRESS
+        else:
+            # CREATE/DELETE IPTABLES FIREWALL ALLOW RULE - SPECIFIED CLIENT IP ADDRESS
+            run_OS_cmd(
+                [
+                    final_iptables_bin_full_path, iptables_action_switch_arg, 'INPUT',
+                    '-p', 'tcp', '--dport',
+                    str(provided_allowed_TCP_port), '-j', 'ACCEPT',
+                    '-s', allowed_client_IP
+                    ],
+                'modify_iptables_rules OS command execution error (allow IP)', 4, 2
+                )
+    # CREATE/DELETE IPTABLES FIREWALL DROP AND LOG RULES
+    run_OS_cmd(
+        [
+            final_iptables_bin_full_path, iptables_action_switch_arg, 'INPUT',
+            '-p', 'tcp', '--dport',
+            str(provided_allowed_TCP_port), '-j', 'LOG',
+            '--log-prefix', '"INPUT:DROP:"', '--log-level',
+            '6'
+            ],
+        'modify_iptables_rules OS command execution error (log)', 4, 2
+        )
+    run_OS_cmd(
+        [
+            final_iptables_bin_full_path, iptables_action_switch_arg, 'INPUT',
+            '-p', 'tcp', '--dport',
+            str(provided_allowed_TCP_port), '-j', 'DROP'
+            ],
+        'modify_iptables_rules OS command execution error (drop)', 4, 2
+        )
+
+    # PRINT MESSAGE AND RETURN
+    print_indented_line(
+        print_indent, 'SUCCESS',
+        (action_message + ' temporary iptables firewall rules')
+        )
+    return
+
+
+# [FUNCTION] CREATE IPTABLES FIREWALL RULES - ALLOW ACCESS TO PROVIDED ALLOWED CLIENT IP ADDRESS(ES); DROP REST
+def create_iptables_rules(provided_allowed_client_IPs, provided_allowed_TCP_port):
+    return modify_iptables_rules(
+        provided_allowed_client_IPs,
+        provided_allowed_TCP_port,
+        'create'
+        )
+
+
+# [FUNCTION] DELETE CREATED IPTABLES FIREWALL RULES
+def delete_iptables_rules(provided_allowed_client_IPs, provided_allowed_TCP_port):
+    return modify_iptables_rules(
+        provided_allowed_client_IPs,
+        provided_allowed_TCP_port,
+        'delete'
+        )
+
+
+# [FUNCTION] PROCESS USER-PROVIDED INPUT
+def process_user_input(provided_arguments):
+
+    # [FUNCTION] PRINT CURRENT SETTINGS OF PROVIDED FEATURE-RELATED VALUES TO OUTPUT
+    def output_current_settings_feature(
+            provided_user_value, provided_hardcoded_value, provided_msg,
+            provided_msg_default, provided_print_indent
+            ):
+        # USER DID PROVIDE (VALID) VALUE VIA CLI
+        if provided_user_value:
+            print_indented_line(
+                provided_print_indent, 'INFO',
+                (provided_msg + ' (CLI)')
+                )
+        # USER DID NOT PROVIDE VALUE VIA CLI
+        #   HARDCODED (VALID) VALUE EXISTS
+        elif provided_hardcoded_value:
+            print_indented_line(
+                provided_print_indent, 'INFO',
+                (provided_msg + ' (hardcoded)')
+                )
+        #   HARDCODED VALUE DOES NOT EXIST => PREDEFINED (DEFAULT) VALUE USED
+        else:
+            print_indented_line(
+                provided_print_indent, 'INFO',
+                provided_msg_default
+                )
+
+
+    # [FUNCTION] PRINT CURRENT SETTINGS OF PROVIDED BINARY-RELATED VALUES TO OUTPUT
+    def output_current_settings_bin(
+            provided_bin_value, provided_bin_value_used_msg, provided_hardcoded_value_used_msg,
+            provided_print_indent
+            ):
+        # BINARY FOUND
+        if provided_bin_value:
+            print_indented_line(
+                provided_print_indent, 'INFO',
+                provided_bin_value_used_msg
+                )
+        # HARDCODED BINARY
+        else:
+            print_indented_line(
+                provided_print_indent, 'INFO',
+                provided_hardcoded_value_used_msg
+                )
+
+
+    # [FUNCTION] PRINT X.509 CERTIFICATE COMMON NAME RELATED SETTINGS
+    def output_current_settings_x509_cn(provided_arguments, provided_print_indent):
+        # USER PROVIDED (VALID) COMMON NAME OF AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE VIA CLI
+        if (provided_arguments.temp_x509_cn):
+            print_indented_line(
+                provided_print_indent, 'INFO',
+                'Using provided CN (CLI)'
+                )
+        # HARDCODED (VALID) COMMON NAME OF AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE
+        elif (hardcoded_temp_x509_cert_CN):
+            print_indented_line(
+                provided_print_indent, 'INFO',
+                'Using provided CN (hardcoded)'
+                )
+        # USER DID NOT PROVIDE COMMON NAME OF AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE VIA CLI + COMMON NAME OF AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE NOT HARDCODED => DEFAULT (PREDEFINED) VALUE USED
+        else:
+            print_indented_line(
+                provided_print_indent, 'INFO',
+                'Using default CN'
+                )
+
+
+    # [FUNCTION] PRINT CURRENT X.509 CERTIFICATE-RELATED SETTINGS TO OUTPUT
+    def output_current_settings_x509(provided_arguments):
+        # ALLOW MODIFICATION OF GLOBAL VARIABLES
+        global final_x509_cert_full_path
+
+        # USER PROVIDED (VALID) PATH TO X.509 CERTIFICATE VIA CLI
+        indent_depth_x509_cert = 4
+        if provided_arguments.x509_cert_path:
+            print_indented_line(
+                3, 'INFO',
+                'Using provided X.509 server certificate (CLI)'
+                )
+        # HARDCODED (VALID) PATH TO X.509 CERTIFICATE
+        elif hardcoded_x509_cert_full_path:
+            print_indented_line(
+                3, 'INFO',
+                'Using provided X.509 server certificate (hardcoded)'
+                )
+        # USER DID NOT PROVIDE PATH TO X.509 CERTIFICATE VIA CLI + PATH TO X.509 CERTIFICATE NOT HARDCODED => AUTOGENERATE TEMPORARY X.509 CERTIFICATE
+        else:
+            # CONSTRUCT OS COMMAND TO EXECUTE
+            temp_x509_cert_full_path = '/tmp/' + 'barabbas_temp_x509_cert_' + gen_rnd_str(16) + '.pem'
+            command_to_exec_list = [
+                final_openssl_bin_full_path, 'req', '-newkey',
+                'rsa:4096', '-x509', '-days',
+                '365', '-nodes', '-subj',
+                final_temp_x509_cert_subj_full, '-out', temp_x509_cert_full_path,
+                '-keyout', temp_x509_cert_full_path
+                ]
+            # EXECUTE OS COMMAND
+            run_OS_cmd(
+                command_to_exec_list,
+                'Can not generate X.509 certificate (openssl)',
+                4, 2
+                )
+            final_x509_cert_full_path = temp_x509_cert_full_path
+            indent_depth_x509_cert = 5
+            print_indented_line(
+                4, 'SUCCESS',
+                'Generated temporary self-signed X.509 server certificate'
+                )
+            # PRINT X.509 CERTIFICATE COMMON NAME RELATED SETTINGS
+            output_current_settings_x509_cn(provided_arguments, 5)
+        # DISPLAY FINGERPRINT OF USED X.509 CERTIFICATE
+        try:
+            print_indented_line(
+                indent_depth_x509_cert, 'INFO', (
+                    check_output(
+                        [
+                            final_openssl_bin_full_path, 'x509', '-in',
+                            final_x509_cert_full_path, '-noout', '-sha256',
+                            '-fingerprint'
+                            ],
+                        stderr=open('/dev/null', 'w')
+                        )
+                    ).decode('utf-8').strip('\n')
+                )
+        except CalledProcessError:
+            print_indented_line(
+                indent_depth_x509_cert, 'ERROR',
+                'Can not calculate fingerprint of X.509 certificate (openssl)'
+                )
+            exit()
+
+
+    # [FUNCTION] PRINT CURRENT SETTTINGS OF PROVIDED DISABLE FEATURE-RELATED VALUES TO OUTPUT
+    def output_current_settings_disa(
+            provided_user_disa_value, provided_hardcoded_disa_value, provided_disa_msg,
+            provided_disa_msg_type
+            ):
+        # FEATURE DISABLED
+        if (provided_user_disa_value or provided_hardcoded_disa_value):
+            # FEATURE DISABLED VIA CLI
+            if provided_user_disa_value:
+                print_indented_line(
+                    2, provided_disa_msg_type,
+                    (provided_disa_msg + ' disabled (CLI)')
+                    )
+            # FEATURE DISABLED VIA HARDCODED INPUT
+            else:
+                print_indented_line(
+                    2, provided_disa_msg_type,
+                    (provided_disa_msg + ' disabled (hardcoded)')
+                    )
+        # FEATURE ENABLED
+        else:
+            print_indented_line(
+                2, 'INFO',
+                (provided_disa_msg + ' enabled')
+                )
+
+
+    # [FUNCTION] PRINT CURRENT ALLOWED CLIENT IP ADDRESS(ES)-RELATED SETTINGS TO OUTPUT
+    def output_current_settings_client_IPs(provided_arguments):
+        # USER DID PROVIDE (VALID) (LIST OF) ALLOWED CLIENT IP(S) VIA CLI
+        if (
+                    not isinstance(
+                        provided_arguments.allowed_client_IPs_list,
+                        str
+                    )
+                ):
+            print_indented_line(
+                3, 'INFO',
+                'Using provided allowed client IP address(es) (CLI)'
+                )
+        # HARDCODED (LIST OF) ALLOWED CLIENT IP(S) EXISTS
+        elif hardcoded_allowed_client_IPs:
+            print_indented_line(
+                3, 'INFO',
+                'Using provided allowed client IP address(es) (hardcoded)'
+                )
+        # USER DID NOT PROVIDE (VALID) (LIST OF) ALLOWED CLIENT IP(S) VIA CLI + HARDCODED (LIST OF) ALLOWED CLIENT IP(S) DOES NOT EXISTS => PREDEFINED (DEFAULT) VALUE USED
+        else:
+            print_indented_line(
+                3, 'WARNING',
+                'Allowing access to all/any client IP address(es)'
+                )
+
+
+    # PRINT SPECIFIED USER CONFIGURATION/SETTINGS
+    print_indented_line(
+        0, 'SUCCESS',
+        'Barabbas online'
+        )
+    print_indented_line(
+        1, 'INFO',
+        'Current web server settings'
+        )
+
+    #### NETWORK INTERFACE
+    output_current_settings_feature(
+        user_local_net_iface, hardcoded_local_net_iface,
+        'Using provided local network interface', 'Using default local network interface', 2
+        )
+
+    #### LISTENING PORT
+    output_current_settings_feature(
+        user_list_port, hardcoded_list_port,
+        'Using provided listening port', 'Using default listening port', 2
+        )
+
+    #### AUTHENTICATION
+    output_current_settings_disa(
+        provided_arguments.disable_authn, hardcoded_authn_disa,
+        'HTTP basic authentication', 'WARNING'
+        )
+    # AUTHENTICATION ENABLED
+    if (not final_authn_disa):
+        output_current_settings_feature(
+            provided_arguments.username_password, hardcoded_http_basic_authn_username_password,
+            'Using provided credentials', 'Generated temporary credentials', 3
+            )
+        print_indented_line(
+            4, 'INFO',
+            ('Username: \033[1;32m' + final_username + '\033[1;m')
+            )
+        print_indented_line(
+            4, 'INFO',
+            ('Password: \033[1;32m' + final_password + '\033[1;m')
+            )
+
+    #### ENCRYPTION
+    output_current_settings_disa(
+        provided_arguments.disable_encr, hardcoded_encr_disa,
+        'TLS encryption', 'WARNING'
+        )
+    # TLS ENABLED
+    if (not final_encr_disa):
+        # 'OPENSSL' BINARY
+        output_current_settings_bin(
+            final_openssl_bin_full_path_found,
+            '"OpenSSL" binary found', 'Using provided path to "OpenSSL" binary (hardcoded)', 3
+            )
+        # X.509 CERTIFICATE
+        output_current_settings_x509(provided_arguments)
+
+    #### WEB ROOT DIRECTORY
+    output_current_settings_feature(
+        (
+            not isinstance(
+                provided_arguments.web_root_dir,
+                str
+                )
+            ),
+        hardcoded_web_root_dir_full_path,
+        'Using provided path to web root directory', 'Using current directory as web root directory', 2
+        )
+    # PROVIDED WEB ROOT DIRECTORY NOT WRITABLE
+    if (
+            not access(
+                final_web_root_dir_full_path,
+                W_OK
+                )
+            ):
+        print_indented_line(
+            3, 'WARNING',
+            'No write permissions'
+            )
+
+    #### FILE MD5 CHECKSUMS
+    output_current_settings_disa(
+        provided_arguments.disable_chksm, hardcoded_file_md5_chksm_disa,
+        'File MD5 checksums', 'INFO'
+        )
+
+    ##### ACCESS RESTRICTION
+    # BOTH ACCESS RESTRICTION LEVELS/FUNCTIONALITIES DISABLED (IP; APPLICATION)
+    if (final_IP_acc_restr_disa and final_app_acc_restr_disa):
+        # BOTH ACCESS RESTRICTION LEVELS/FUNCTIONALITIES DISABLED VIA CLI
+        if ((not hardcoded_IP_acc_restr_disa) and (not hardcoded_app_acc_restr_disa)):
+            print_indented_line(
+                2, 'WARNING',
+                'Access restriction disabled (CLI)'
+                )
+        # BOTH ACCESS RESTRICTION LEVELS/FUNCTIONALITIES DISABLED VIA HARDCODED VALUES
+        elif (hardcoded_IP_acc_restr_disa and hardcoded_app_acc_restr_disa):
+            print_indented_line(
+                2, 'WARNING',
+                'Access restriction disabled (hardcoded)'
+                )
+        # ACCESS RESTRICTION LEVELS/FUNCTIONALITIES DISABLED VIA CLI AND HARDCODED VALUES
+        else:
+            print_indented_line(
+                2, 'WARNING',
+                'Access restriction disabled (CLI/hardcoded)'
+                )
+    # AT LEAST ONE ACCESS RESTRICTION LEVEL/FUNCTIONALITY ENABLED
+    else:
+        # PROCESS SETTINGS OF IPTABLES ACCESS RESTRICTION FUNCTIONALITY (IP LAYER)
+        output_current_settings_disa(
+            provided_arguments.disable_IP_fw, hardcoded_IP_acc_restr_disa,
+            'IP layer access restriction', 'WARNING'
+            )
+        # IPTABLES ACCESS RESTRICTION FUNCTIONALITY ENABLED (IP LAYER)
+        if (not final_IP_acc_restr_disa):
+            # ALLOWED CLIENT IP ADDRESS(ES)
+            output_current_settings_client_IPs(provided_arguments)
+            # 'IPTABLES'' BINARY
+            output_current_settings_bin(
+                final_iptables_bin_full_path_found,
+                '"iptables" binary found', 'Using provided path to "iptables" binary (hardcoded)', 4
+                )
+            # CREATE IPTABLES FIREWALL ALLOW RULES
+            create_iptables_rules(final_allowed_client_IPs_list, final_list_port)
+
+        # PROCESS SETTINGS OF HTTP ACCESS RESTRICTION FUNCTIONALITY (APPLICATION LAYER)
+        output_current_settings_disa(
+            provided_arguments.disable_app_fw, hardcoded_app_acc_restr_disa,
+            'Application layer access restriction', 'WARNING'
+            )
+        # HTTP ACCESS RESTRICTION FUNCTIONALITY ENABLED (APPLICATION LAYER)
+        if (not final_app_acc_restr_disa):
+            # ALLOWED CLIENT IP ADDRESS(ES)
+            output_current_settings_client_IPs(provided_arguments)
+
+
+################################################################
+# FUNCTIONS - WEB SERVER HANDLING (RUN)
+################################################################
+
+# [FUNCTION] RUN/START WEB SERVER
+def run_web_server(
+        server_class=HTTPServer, handler_class=SimpleHTTPRequestHandlerWithUploadAuthentication, iface='',
+        port=8000, disable_tls=False, directory=getcwd()
+        ):
+    server_address = (iface, port)
+    httpd = server_class(server_address, handler_class)
+    sa = httpd.socket.getsockname()
+
+    # CHANGE CURRENT DIRECTORY TO WEB ROOT DIRECTORY
+    chdir(directory)
+
+    # ENCRYPTION (TLS) IS USED
+    if (not disable_tls):
+        print_indented_line(
+            1, 'SUCCESS',
+            ('Serving \033[1;32mHTTPS\033[1;m on \033[1;32m' + str(sa[0]) + '\033[1;m port \033[1;32mTCP/' + str(sa[1]) + '\033[1;m')
+            )
+        print_indented_line(
+            2, 'INFO',
+            'Press \033[1;31mCtrl+c\033[1;m to stop web server and exit'
+            )
+        httpd.socket = wrap_socket(httpd.socket, certfile=final_x509_cert_full_path, server_side=True)
+    # ENCRYTPTION (TLS) IS NOT USED
+    else:
+        print_indented_line(
+            1, 'SUCCESS',
+            ('Serving \033[1;32mHTTP\033[1;m on \033[1;32m' + str(sa[0]) + '\033[1;m port \033[1;32mTCP/' + str(sa[1]) + '\033[1;m')
+            )
+        print_indented_line(
+            2, 'INFO',
+            'Press \033[1;31mCtrl+c\033[1;m to stop web server and exit'
+            )
+
+    # RUN WEB SERVER
+    httpd.serve_forever()
+    # CLOSE WEB SERVER UPON EXIT
+    httpd.server_close()
+
+
+################################################################
+# FUNCTIONS - MAIN
+################################################################
+
+# [FUNCTION] PROCESS SIGINT
+def process_sigint():
+    print()
+    print_indented_line(
+        2, 'INFO',
+        'Exiting'
+        )
+
+    # TEMPORARY IPTABLES FIREWALL RULES CREATED
+    if (not final_IP_acc_restr_disa):
+        delete_iptables_rules(final_allowed_client_IPs_list, final_list_port)
+    # TEMPORARY X.509 CERTIFICATE CREATED
+    if final_temp_x509_cert_subj_full:
+        remove(final_x509_cert_full_path)
+        print_indented_line(
+            3, 'SUCCESS',
+            'Deleted temporary self-signed X.509 server certificate'
+            )
+
+
+# [FUNCTION] MAIN
+if (__name__ == '__main__'):
+    # CONFIRM ROOT PRIVILEGES
+    if (geteuid() != 0):
+        print_indented_line(
+            0, 'ERROR',
+            'Root privileges required'
+            )
+        exit()
+
+    # PARSE USER-PROVIDED INPUT
+    user_input_parser = parse_user_input()
+    provided_arguments = user_input_parser.parse_args()
+    # VALIDATE USER-PROVIDED INPUT
+    val_user_input(user_input_parser)
+    # PROCCESS USER-PROVIDED INPUT
+    process_user_input(provided_arguments)
+
+    # RUN WEB SERVER WITH USER-PROVIDED VALUES
+    try:
+        run_web_server(
+            iface=final_local_net_iface,
+            port=final_list_port,
+            disable_tls=final_encr_disa,
+            directory=final_web_root_dir_full_path
+            )
+    except KeyboardInterrupt:
+        # PROCESS SIGINT
+        process_sigint()
+
+
+# EoF
