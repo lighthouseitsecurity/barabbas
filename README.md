@@ -34,7 +34,7 @@ Installation
 Installer script:
 ```
 sudo su
-wget https://github.com/lighthouseitsecurity/barabbas/raw/master/barabbas -O /tmp/barabbas && chmod 700 /tmp/barabbas && chown root:root /tmp/barabbas && mv /tmp/barabbas /usr/local/sbin/barabbas
+wget https://raw.githubusercontent.com/lighthouseitsecurity/barabbas/main/barabbas -O /tmp/barabbas && chmod 700 /tmp/barabbas && chown root:root /tmp/barabbas && mv /tmp/barabbas /usr/local/sbin/barabbas
 ```
 
 Usage
