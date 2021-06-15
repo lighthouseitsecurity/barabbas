@@ -75,9 +75,9 @@ All options can be specified:
   * will override respective default and hardcoded values
 
 Concrete examples of various server and client configurations, along with additional screenshots, can be found on the wiki:
-* [server](https://github.com/lighthouseitsecurity/barabbas/wiki/server)
-* [Windows clients](https://github.com/lighthouseitsecurity/barabbas/wiki/clients_windows)
-* [Linux clients](https://github.com/lighthouseitsecurity/barabbas/wiki/clients_linux)
+* [Server](https://github.com/lighthouseitsecurity/barabbas/wiki/1_0_0___Server)
+* [Linux clients](https://github.com/lighthouseitsecurity/barabbas/wiki/2_1_0___Linux)
+* [Windows clients](https://github.com/lighthouseitsecurity/barabbas/wiki/2_2_0___Windows)
 
 Story/Idea
 ----
