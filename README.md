@@ -76,8 +76,8 @@ All options can be specified:
 
 Concrete examples of various server and client configurations, along with additional screenshots, can be found on the wiki:
 * [Server](https://github.com/lighthouseitsecurity/barabbas/wiki/1_0_0___Server)
-* [Linux clients](https://github.com/lighthouseitsecurity/barabbas/wiki/2_1_0___Linux)
-* [Windows clients](https://github.com/lighthouseitsecurity/barabbas/wiki/2_2_0___Windows)
+* [Linux CLI clients](https://github.com/lighthouseitsecurity/barabbas/wiki/2_1_0___Linux)
+* [Windows CLI clients](https://github.com/lighthouseitsecurity/barabbas/wiki/2_2_0___Windows)
 
 Story/Idea
 ----
