@@ -1,8 +1,8 @@
 #!/usr/bin/python3
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 __author__ = 'Tomislav Paskalev'
-__year__ = '2021'
+__year__ = '2022'
 
 
 ################################################################
@@ -15,6 +15,7 @@ from base64 import b64encode
 from fcntl import ioctl
 from hashlib import md5
 from html import escape
+from http.client import responses as http_responses
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
 from mimetypes import init, inited, types_map
@@ -25,12 +26,14 @@ from re import findall, finditer
 from shutil import copyfileobj
 from signal import SIGINT, signal
 from socket import AF_INET, gethostname, inet_ntoa, SOCK_DGRAM, socket
+from socketserver import ThreadingMixIn
 from ssl import SSLError, wrap_socket
 from string import ascii_letters, digits
 from struct import pack
 from subprocess import CalledProcessError, check_output, DEVNULL, run
 from sys import exit
 import urllib.error, urllib.parse, urllib.request
+from uuid import uuid4 as generate_guid
 
 
 ################################################################
@@ -57,7 +60,7 @@ hardcoded_web_root_dir_full_path = ''
 hardcoded_x509_cert_full_path = ''
 # DISABLE TLS ENCRYPTION (E.G. True)
 hardcoded_encr_disa = None
-# DISABLE FILE MD5 CHECKSUMS (E.G. True)
+# DISABLE SERVER-SIDE FILE MD5 CHECKSUMS (E.G. True)
 hardcoded_file_md5_chksm_disa = None
 # ALLOWED IP ADDRESS(ES) (COMMA SEPARATED LIST; E.G. '192.168.1.110,192.168.1.120,192.168.1.125')
 hardcoded_allowed_client_IPs = ''
@@ -69,20 +72,24 @@ hardcoded_app_acc_restr_disa = None
 hardcoded_openssl_bin_full_path = ''
 # 'IPTABLES' BINARY FULL PATH (E.G. '/usr/local/sbin/iptables')
 hardcoded_iptables_bin_full_path = ''
-# TEMPORARY X.509 CERTIFICATE COMMON NAME (REQUIRED BY AUTOGENERATE X.509 CERTIFICATE FUNCTIONALITY)
-#   REQUIRED FOR X.509 CERTIFICATE CLIENT-SIDE VALIDATION (AUTHENTICATES SERVER-SIDE/AVOIDS BLINDLY ACCEPTING SELF-SIGNED CERTIFICATES/MITIGATES MAN-IN-THE-MIDDLE RISK)
+# COMMON NAME OF TEMPORARY X.509 CERTIFICATE (REQUIRED BY AUTOGENERATE X.509 CERTIFICATE FUNCTIONALITY)
+#   REQUIRED FOR CLIENT-SIDE VALIDATION OF X.509 CERTIFICATE (SERVER AUTHENTICATION)
 #   VALID VALUES: IP ADDRESS OF LOCAL LISTENING NETWORK INTERFACE OR (ARBITRARY) HOSTNAME (E.G. '192.168.1.100'; 'kali')
-#     RESOLVED (ARBITRARY) HOSTNAME MUST MATCH LISTENING NETWORK INTERFACE IP ADDRESS (I.E. MUST BE DNS RESOLVABLE FROM CLIENT SYSTEM => MODIFY HOSTS FILE IF NEEDED)
+#     RESOLVED (ARBITRARY) HOSTNAME MUST MATCH LISTENING NETWORK INTERFACE IP ADDRESS (I.E. SPECIFIED HOSTNAME MUST BE RESOLVABLE FROM CLIENT SYSTEM => MODIFY HOSTS FILE IF REQUIRED)
 #     NOTES - LINUX:
-#       CURL X.509 CERTIFICATE VALIDATION WILL WORK WITH BOTH IP ADDRESS OF LOCAL LISTENING NETWORK INTERFACE OR HOSTNAME VALUES
+#       CURL X.509 CERTIFICATE VALIDATION WILL WORK WITH FOLLOWING VALUES:
+#         IP ADDRESS OF LOCAL LISTENING NETWORK INTERFACE
+#         HOSTNAME
 #       WGET X.509 CERTIFICATE VALIDATION WILL WORK ONLY WITH HOSTNAME VALUE
 #     NOTES - WINDOWS:
-#       POWERSHELL X.509 CERTIFICATE VALIDATION WILL WORK WITH BOTH IP ADDRESS OF LOCAL LISTENING NETWORK INTERFACE OR HOSTNAME VALUES
+#       POWERSHELL X.509 CERTIFICATE VALIDATION WILL WORK WITH FOLLOWING VALUES:
+#         IP ADDRESS OF LOCAL LISTENING NETWORK INTERFACE
+#         HOSTNAME
 hardcoded_temp_x509_cert_CN = ''
 
 #### REQUIRED VALUES (MUST BE SPECIFIED)
-# TEMPORARY X.509 CERTIFICATE SUBJECT DATA (REQUIRED BY AUTOGENERATE X.509 CERTIFICATE FUNCTIONALITY; E.G. '/C=.../ST=.../L=.../O=.../OU=.../CN=')
-#   NOTE: COMMON NAME (CN) IS CONCATENATED SEPARATELY (LATER)
+# SUBJECT DATA OF TEMPORARY X.509 CERTIFICATE (REQUIRED BY AUTOGENERATE X.509 CERTIFICATE FUNCTIONALITY; E.G. '/C=.../ST=.../L=.../O=.../OU=.../CN=')
+#   NOTE: COMMON NAME (CN) VALUE IS CONCATENATED SEPARATELY (PERFORMED LATER; I.E. LEAVE EMPTY/DO NOT SPECIFY HERE)
 hardcoded_temp_x509_cert_subj = '/C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/OU=Microsoft Corporation/CN='
 # 'WHICH' BINARY FULL PATH
 hardcoded_which_bin_full_path = '/bin/which'
@@ -121,21 +128,62 @@ final_app_acc_restr_disa = False
 authn_clients_list = []
 allwd_clients_list = []
 restr_clients_list = []
+bits_sess_dest_file_dict = {}
+bits_sess_dest_range_dict = {}
 
 
 ################################################################
 # CLASSES
 ################################################################
 
+# MULTITHREADING HANDLER
+class ThreadingSimpleServer(ThreadingMixIn, HTTPServer):
+    # USE DAEMON THREADING
+    #   https://docs.python.org/3/library/threading.html#thread-objects
+    daemon_threads = True
+    pass
+
+
 # HTTP REQUEST HANDLER WITH UPLOAD AND AUTHENTICATION FUNCTIONALITIES
 class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
 
-    # CHANGE PREDEFINED HTTP RESPONSE SERVER HEADER VALUE
+    # CHANGE DEFAULT VALUES
+    #   HTTP RESPONSE SERVER HEADER VALUE
     server_version = 'Apache'
     sys_version = ''
+    #   HTTP VERSION
+    #     NOTE: REQUIRED BY BITSADMIN
+    protocol_version = 'HTTP/1.1'
 
 
-    # [FUNCTION] OVERRIDE LOGGING HANDLING (1)
+    # [FUNCTION] OVERRIDE CONNECTION REQUEST HANDLING
+    def handle(self):
+        self.close_connection = True
+        try:
+            self.handle_one_request()
+        # TCP CONNECTION RESET INITIATED BY CLIENT
+        except (ConnectionResetError, BrokenPipeError):
+            print_indented_line(
+                2, 'WARNING',
+                ('Connection reset by client (TCP) [' + self.client_address[0] + ']')
+                )
+            pass
+        # TLSV1_ALERT_UNKNOWN_CA, SENT BY SOME CLIENTS, WHEN NOT POSSIBLE TO VERIFY SERVER CERTIFICATE (UNKNOWN ISSUER)
+        except SSLError:
+            pass
+        while not self.close_connection:
+            try:
+                self.handle_one_request()
+            # HTTP CONNECTION RESET INITIATED BY CLIENT
+            except (ConnectionResetError, BrokenPipeError):
+                print_indented_line(
+                    2, 'WARNING',
+                    ('Connection reset by client (HTTP) [' + self.client_address[0] + ']')
+                    )
+                pass
+
+
+    # [FUNCTION] OVERRIDE LOG HANDLING - REQUEST
     def log_request(self, code='-', size='-'):
         self.log_message(
             '"%s" %s %s', self.requestline, str(code),
@@ -143,7 +191,12 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         )
 
 
-    # [FUNCTION] OVERRIDE LOGGING HANDLING (2)
+    # [FUNCTION] OVERRIDE LOG HANDLING - ERROR
+    def log_error(self, format, *args):
+        return
+
+
+    # [FUNCTION] OVERRIDE LOG HANDLING - MESSAGE
     def log_message(self, format, *args):
         print_indented_line(
             2, 'INFO',
@@ -157,30 +210,12 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
             )
 
 
-    # [FUNCTION] OVERRIDE LOGGING HANDLING (3)
-    def send_response(self, code, message=None):
-        self.log_request(code, message)
-        self.send_response_only(code, message)
+    # [FUNCTION] OVERRIDE HTTP HANDLING - SEND RESPONSE (HIGH LEVEL)
+    def send_response(self, code, size='-'):
+        self.log_request(code, size)
+        self.send_response_only(code, http_responses[code])
         self.send_header('Server', self.version_string())
         self.send_header('Date', self.date_time_string())
-
-
-    # [FUNCTION] OVERRIDE REQUEST HANDLING
-    def handle(self):
-        self.close_connection = True
-        try:
-            self.handle_one_request()
-        except ConnectionResetError:
-            print_indented_line(
-                2, 'WARNING',
-                ('Connection reset by client (X.509 CN) [' + self.client_address[0] + ']')
-                )
-            pass
-        # CATCH TLSV1_ALERT_UNKNOWN_CA, SENT BY SOME CLIENTS, WHEN NOT POSSIBLE TO VERIFY SERVER CERTIFICATE (UNKNOWN ISSUER)
-        except SSLError:
-            pass
-        while not self.close_connection:
-            self.handle_one_request()
 
 
     # [FUNCTION] CALCULATE MD5 CHECKSUM OF PROVIDED FILE
@@ -239,7 +274,7 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
 
         # [FUNCTION] HANDLE CURRENT CLIENT ACCESS STATUS
         def handle_client_status(provided_client_status_msg_status, provided_client_IP_addr):
-            # CURRENT CLIENT IP ADRESS NOT IN LIST OF ALLOWED CLIENTS
+            # CURRENT CLIENT IP ADDRESS ALLOWED ACCESS
             if ((provided_client_status_msg_status == 'allowed') and (provided_client_IP_addr not in allwd_clients_list)):
                 allwd_clients_list.append(provided_client_IP_addr)
                 print_client_status_msg(
@@ -247,7 +282,7 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
                     provided_client_IP_addr
                     )
                 return
-            # CURRENT CLIENT IP ADRESS NOT IN LIST OF DISALLOWED CLIENTS
+            # CURRENT CLIENT IP ADDRESS NOT ALLOWED ACCESS
             if ((provided_client_status_msg_status == 'denied') and (provided_client_IP_addr not in restr_clients_list)):
                 restr_clients_list.append(provided_client_IP_addr)
                 print_client_status_msg(
@@ -300,7 +335,7 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
 
         # [FUNCTION] HANDLE CURRENT CLIENT AUTHENTICATION STATUS
         def handle_client_status(provided_client_status_msg_status, provided_client_IP_addr):
-            # CURRENT CLIENT IP ADRESS NOT IN LIST OF AUTHENTICATED CLIENTS
+            # CURRENT CLIENT IP ADDRESS AUTHENTICATED
             if ((provided_client_status_msg_status == 'authn') and (provided_client_IP_addr not in authn_clients_list)):
                 authn_clients_list.append(provided_client_IP_addr)
                 print_client_status_msg(
@@ -308,13 +343,13 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
                     provided_client_IP_addr
                     )
                 return
-            # CURRENT CLIENT IP ADRESS NOT IN LIST OF AUTHENTICATED CLIENTS
+            # CURRENT CLIENT IP ADDRESS NOT AUTHENTICATED
             if (provided_client_status_msg_status == 'unauthn'):
                 print_client_status_msg(
                     'Not authenticated', 'WARNING',
                     provided_client_IP_addr
                     )
-            # CURRENT CLIENT IP ADRESS NOT IN LIST OF AUTHENTICATED CLIENTS + CURRENT CLIENT ALREADY PREVIOUSLY AUTHENTICATED => REMOVE FROM LIST OF AUTHENTICATED CLIENTS
+            # CURRENT CLIENT IP ADDRESS PREVIOUSLY AUTHENTICATED => REMOVE FROM LIST OF AUTHENTICATED CLIENTS
             if (
                    (provided_client_status_msg_status == 'unauthn')
                    and
@@ -348,6 +383,7 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
             self.send_response(401)
             self.send_header('WWW-Authenticate', 'Basic realm="' + hardcoded_basic_HTTP_authn_realm + '", charset="UTF-8"')
             self.send_header('Content-Type', 'text/html; charset=UTF-8')
+            self.send_header('Connection', 'close')
             self.end_headers()
             handle_client_status('unauthn', self.client_address[0])
             return False
@@ -372,7 +408,7 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
 
     # [FUNCTION] PERFORM SECURITY CHECKS ON CURRENT CLIENT
     def is_client_allowed(self):
-        # CHECK IF CURRENT CLIENT IS ALLOWED ACCESS
+        # CHECK IF CURRENT CLIENT ALLOWED ACCESS
         if (not self.is_client_IP_allowed()):
             return False
 
@@ -386,6 +422,12 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
 
     # [FUNCTION] SERVE HTTP HEAD REQUEST
     def do_HEAD(self):
+        # PERFORM SECURITY CHECKS ON CURRENT CLIENT
+        if (not self.is_client_allowed()):
+            return
+
+        # PROCESS HEAD REQUEST
+        self.process_HTTP_HEAD_GET_req()
         return
 
 
@@ -396,12 +438,76 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
             return
 
         # PROCESS GET REQUEST
-        req_file = self.process_HTTP_GET_req()
+        req_file = self.process_HTTP_HEAD_GET_req()
         #   FILE REQUESTED
         if req_file:
             self.copy_file_obj(req_file, self.wfile)
             req_file.close()
         return
+
+
+    # [FUNCTION] PROCESS HTTP HEAD/GET REQUEST
+    #   HEAD - PROVIDE INFORMATION ON REQUESTED RESOURCE (DIRECTORY/FILE)
+    #     NOTE: USED/REQUIRED BY BITSADMIN
+    #   GET - DISPLAY CONTENTS OF REQUESTED RESOURCE (DIRECTORY/FILE)
+    def process_HTTP_HEAD_GET_req(self):
+        # VALIDATE FUNCTION INVOCATION
+        valid_options = {
+            'HEAD': 1,
+            'GET': 2
+        }
+        try:
+            valid_options[self.command]
+        # INVALID FUNCTION INVOCATION
+        except:
+            # JUST RAISE EXCEPTION (CODING ERROR; UNRELATED TO USER INPUT/BEHAVIOR)
+            raise ValueError
+
+        # TRANSLATE PATH OF REQUESTED RESOURCE TO FULL PATH
+        req_res_full_path = self.transl_rel_path_to_full_path(self.path)
+
+        # REQUESTED RESOURCE = DIRECTORY
+        if (path.isdir(req_res_full_path)):
+            # REQUESTED DIRECTORY NAME DOES NOT END WITH FORWARD SLASH (INVALID DIRECTORY NAME)
+            if (not self.path.endswith('/')):
+                # HTTP REDIRECT TO PROPER DIRECTORY
+                self.send_response(301)
+                self.send_header('Location', (self.path + '/'))
+                self.end_headers()
+                return None
+            # REQUESTED DIRECTORY NAME DOES END WITH FORWARD SLASH (VALID DIRECTORY NAME)
+            else:
+                return (self.display_dir_contents(req_res_full_path))
+
+        # REQUESTED RESOURCE = FILE
+        #   ATTEMPT TO READ REQUESTED FILE
+        req_file = None
+        try:
+            # READ FILE IN BINARY MODE (AVOIDS NEWLINE TRANSLATION ERRORS)
+            req_file = open(req_res_full_path, 'rb')
+        except IOError:
+        #     FILE DOES NOT EXIST
+            self.send_error(404, '-')
+            return None
+        #     FILE DOES EXIST => ASSEMBLE HTTP RESPONSE HEADER
+        #       GET STATISTICS OF FILE
+        req_file_stats = fstat(req_file.fileno())
+        #       SEND HTTP RESPONSE
+        #         GET REQUEST
+        if (self.command == 'GET'):
+            self.send_response(200, str(req_file_stats.st_size))
+        #         HEAD REQUEST
+        else:
+            self.send_response(200)
+        #       GUESS MIME TYPE OF FILE + SET 'CONTENT-TYPE' HTTP HEADER
+        req_file_MIME_type = self.guess_file_MIME_type(req_res_full_path)
+        self.send_header('Content-Type', req_file_MIME_type)
+        #       SET 'CONTENT-LENGTH' AND 'LAST-MODIFIED' HTTP HEADERS
+        self.send_header('Content-Length', str(req_file_stats.st_size))
+        self.send_header('Last-Modified', self.date_time_string(req_file_stats.st_mtime))
+        self.end_headers()
+        #       RETURN FILE OBJECT
+        return req_file
 
 
     # [FUNCTION] SERVE HTTP POST REQUEST
@@ -466,7 +572,7 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
 
     # [FUNCTION] PROCESS HTTP POST REQUEST - UPLOAD FILE (MULTIPART/FORM-DATA)
     def process_HTTP_POST_req(self):
-        # CHECK FOR CONTENT-TYPE HTTP HEADER
+        # CHECK FOR 'CONTENT-TYPE' HTTP HEADER
         content_type_HTTP_header = self.headers['Content-Type']
         if (not content_type_HTTP_header):
             return (False, 'No Content-Type HTTP header', None)
@@ -567,10 +673,11 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
                             ),
                         uploaded_file_size
                         )
-            # CURRENT LINE DOES NOT CONTAIN BOUNDARY MARKER => WRITE PREVIOUS CONTENT LINE TO DESTINATION FILE
+            # CURRENT LINE DOES NOT CONTAIN BOUNDARY MARKER => NOT LAST LINE OF CONTENT
             else:
                 # ADD CONTENT SIZE TO TOTAL UPLOADED FILE SIZE
                 uploaded_file_size += len(content_previous_line)
+                # WRITE PREVIOUS CONTENT LINE TO DESTINATION FILE
                 dest_file.write(content_previous_line)
                 content_previous_line = content_current_line
 
@@ -578,58 +685,266 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         return (False, 'Unexpected end of data (Content-Length)', None)
 
 
-    # [FUNCTION] PROCESS HTTP GET REQUEST - DISPLAY CONTENTS OF REQUESTED RESOURCE (DIRECTORY/FILE)
-    def process_HTTP_GET_req(self):
-        req_res_full_path = self.transl_rel_path_to_full_path(self.path)
+    # [FUNCTION] SERVE HTTP BITS_POST REQUEST
+    #   https://docs.microsoft.com/en-us/windows/win32/bits/bits-upload-protocol
+    def do_BITS_POST(self):
+        # PERFORM SECURITY CHECKS ON CURRENT CLIENT
+        if (not self.is_client_allowed()):
+            return
 
-        # REQUESTED RESOURCE = DIRECTORY
-        if (path.isdir(req_res_full_path)):
-            # REQUESTED DIRECTORY NAME DOES NOT END WITH FORWARD SLASH (INVALID DIRECTORY NAME)
-            if (not self.path.endswith('/')):
-                # HTTP REDIRECT TO PROPER DIRECTORY
-                self.send_response(301)
-                self.send_header('Location', (self.path + '/'))
-                self.end_headers()
-                return None
-            # REQUESTED DIRECTORY NAME DOES END WITH FORWARD SLASH (VALID DIRECTORY NAME)
+        # PROCESS HTTP BITS_POST FILE UPLOAD REQUEST
+        file_upload_status, file_upload_status_message, file_upload_size = self.process_HTTP_BITS_POST_req()
+
+        # PRINT STATUS MESSAGE ONCE HTTP POST REQUEST PROCESSED
+        #   FILE SUCCESSFULLY UPLOADED
+        if file_upload_status:
+            print_indented_line(
+                2, 'SUCCESS',
+                (file_upload_status_message + ' [' + str(self.client_address[0]) + ']')
+                )
+
+        #   FILE NOT SUCCESSFULLY UPLOADED
+        elif (file_upload_status_message):
+            print_indented_line(
+                2, 'ERROR',
+                (file_upload_status_message + ' [' + str(self.client_address[0]) + ']')
+                )
+
+        return
+
+
+    # [FUNCTION] PROCESS HTTP BITS_POST REQUEST - UPLOAD FILE
+    def process_HTTP_BITS_POST_req(self):
+        # ALLOW MODIFICATION OF GLOBAL VARIABLES
+        global bits_sess_dest_file_dict
+        global bits_sess_dest_range_dict
+
+        # PARSE HEADER - DETERMINE BITS PACKET TYPE
+        bits_packet_type = self.headers['BITS-Packet-Type']
+
+        # NOTE: INTENTIONALLY NOT USING MATCH-CASE STATEMENTS, TO REMAIN COMPATIBLE WITH OLDER PYTHON3 VERSIONS
+        #   https://docs.python.org/3/whatsnew/3.10.html
+        # 1. CREATE SESSION
+        #   https://docs.microsoft.com/en-us/windows/win32/bits/create-session
+        if (bits_packet_type == 'Create-Session'):
+            # GENERATE RANDOM GUID (BITS SESSION IDENTIFIER)
+            bits_sess_guid = ('{' + str(generate_guid()) + '}')
+            # ASSEMBLE FULL PATH FOR DESTINATION FILE
+            bits_dest_file_full_path = self.transl_rel_path_to_full_path(self.path)
+            # ATTEMPT TO OPEN DESTINATION FILE FOR WRITING/CREATE FILE
+            try:
+                bits_dest_file = open(bits_dest_file_full_path, 'wb')
+            except IOError:
+                return (False, 'Insufficient file permissions (write)', None)
+
+            # UPDATE GLOBAL DICTIONARY FOR MANAGING FILES OF ACTIVE BITS SESSIONS - ADD CURRENT SESSION + DESTINATION FILE
+            bits_sess_dest_file_dict.update({bits_sess_guid:bits_dest_file})
+            # UPDATE GLOBAL DICTIONARY FOR MANAGING RANGES OF ACTIVE BITS SESSIONS - ADD CURRENT SESSION + RANGE 0
+            bits_sess_dest_range_dict.update({bits_sess_guid:0})
+
+            # ASSEMBLE RESPONSE HTTP HEADER
+            # https://docs.microsoft.com/en-us/windows/win32/bits/ack-for-create-session
+            self.send_response(200)
+            self.send_header('BITS-Packet-Type', 'Ack')
+            self.send_header('BITS-Protocol', '{7df0354d-249b-430f-820d-3d2a9bef4931}')
+            self.send_header('BITS-Session-Id', bits_sess_guid)
+            self.send_header('Accept-Encoding', 'Identity')
+            self.send_header('Content-Length', str(0))
+            self.end_headers()
+
+        # 2. FRAGMENT
+        #   https://docs.microsoft.com/en-us/windows/win32/bits/fragment
+        elif (bits_packet_type == 'Fragment'):
+            # PARSE HTTP REQUEST
+            #   CURRENT BITS SESSION ID
+            bits_sess_guid = self.headers['BITS-Session-Id']
+            #   CURRENT RANGE OFFSET; TOTAL SIZE
+            next_byte_offset = (int(self.headers['Content-Range'].split('-')[1].split('/')[0]) + 1)
+            total_size = int(self.headers['Content-Range'].split('/')[1])
+
+            # CALCULATE RECEIVED DATA SIZE
+            last_offset = bits_sess_dest_range_dict[bits_sess_guid]
+            current_offset = next_byte_offset
+            total_fragment_size = (current_offset - last_offset)
+            # WRITE CONTENT TO DESTINATION FILE - APPEND CURRENT DATA
+            bits_dest_file = bits_sess_dest_file_dict[bits_sess_guid]
+            obtained_data = self.rfile.read(total_fragment_size)
+            bits_dest_file.write(obtained_data)
+
+            # UPDATE GLOBAL DICTIONARY FOR MANAGING RANGES OF ACTIVE BITS SESSIONS - CURRENT OFFSET BECOMES LAST OFFEST
+            bits_sess_dest_range_dict.update({bits_sess_guid:current_offset})
+
+            # ASSEMBLE RESPONSE HTTP HEADER
+            # https://docs.microsoft.com/en-us/windows/win32/bits/ack-for-fragment
+            self.send_response(200, self.headers['Content-Length'])
+            self.send_header('BITS-Packet-Type', 'Ack')
+            self.send_header('BITS-Session-Id', bits_sess_guid)
+            self.send_header('BITS-Received-Content-Range', str(next_byte_offset))
+            # CHECK IF LAST FRAGMENT
+            if (next_byte_offset == total_size):
+                # CONSTRUCT FILE URI
+                scheme = 'https'
+                # CHECK IF ENCRYPTION DISABLED (I.E. IF HTTP USED)
+                if (final_encr_disa):
+                    scheme = 'http'
+                file_uri = (scheme + '://' + self.headers['Host'] + self.path)
+                # SEND ADDITIONAL HTTP HEADER (REQUIRED FOR CLIENT TO PROCEED TO NEXT STEP IN BITS FILE TRANSFER)
+                self.send_header('BITS-Reply-URL', file_uri)
+                # CLOSE DESTINATION FILE
+                bits_dest_file.close()
+            # (CONTINUATION)
+            self.send_header('Content-Length', str(0))
+            self.end_headers()
+
+        # 3. CLOSE-SESSION
+        #   https://docs.microsoft.com/en-us/windows/win32/bits/close-session
+        elif (bits_packet_type == 'Close-Session'):
+            # PARSE HTTP REQUEST
+            #   CURRENT BITS SESSION ID
+            bits_sess_guid = self.headers['BITS-Session-Id']
+
+            # ASSEMBLE RESPONSE HTTP HEADER
+            # https://docs.microsoft.com/en-us/windows/win32/bits/ack-for-close-session
+            self.send_response(200)
+            self.send_header('BITS-Packet-Type', 'Ack')
+            self.send_header('BITS-Session-Id', bits_sess_guid)
+            self.send_header('Content-Length', str(0))
+            self.end_headers()
+
+            # OBTAIN UPLOADED FILE INFO
+            dest_file_full_path = self.transl_rel_path_to_full_path(self.path)
+            total_size = bits_sess_dest_range_dict[bits_sess_guid]
+
+            # UPDATE GLOBAL DICTIONARY FOR MANAGING FILES OF ACTIVE BITS SESSIONS - REMOVE CURRENT SESSION
+            bits_sess_dest_file_dict.pop(bits_sess_guid)
+            # UPDATE GLOBAL DICTIONARY FOR MANAGING RANGES OF ACTIVE BITS SESSIONS - REMOVE CURRENT SESSION
+            bits_sess_dest_range_dict.pop(bits_sess_guid)
+
+            # FILE (FULLY) UPLOADED
+            #   FILE MD5 CHECKSUM FEATURE ENABLED
+            if (not final_file_md5_chksm_disa):
+                # RETURN FULL DESTINATION PATH AND MD5 HASHSUM OF UPLOADED FILE
+                return (
+                    True,
+                    (
+                        'FILE UPLOADED: \'%s\' (MD5 %s)' % (
+                            dest_file_full_path,
+                            self.calc_file_chksm_md5(dest_file_full_path)
+                            )
+                        ),
+                    total_size
+                    )
+            #   FILE MD5 CHECKSUM FEATURE DISABLED
             else:
-                return (self.display_dir_contents(req_res_full_path))
+                # RETURN FULL DESTINATION PATH OF UPLOADED FILE
+                return (
+                    True,
+                    (
+                        'FILE UPLOADED: \'%s\'' % dest_file_full_path
+                        ),
+                    total_size
+                    )
 
-        # REQUESTED RESOURCE = FILE
-        #   ATTEMPT TO READ REQUESTED FILE
-        req_file = None
+        # FILE NOT (FULLY) UPLOADED
+        return (False, None, None)
+
+
+    # [FUNCTION] SERVE HTTP PUT REQUEST
+    #   https://www.rfc-editor.org/rfc/rfc2616#page-55
+    def do_PUT(self):
+        # PERFORM SECURITY CHECKS ON CURRENT CLIENT
+        if (not self.is_client_allowed()):
+            return
+
+        # PROCESS HTTP PUT FILE UPLOAD REQUEST
+        file_upload_status, file_upload_status_message, file_upload_size = self.process_HTTP_PUT_req()
+
+        # PRINT STATUS MESSAGE ONCE HTTP PUT REQUEST PROCESSED
+        #   FILE SUCCESSFULLY UPLOADED
+        if file_upload_status:
+            print_indented_line(
+                2, 'SUCCESS',
+                (file_upload_status_message + ' [' + str(self.client_address[0]) + ']')
+                )
+
+        #   FILE NOT SUCCESSFULLY UPLOADED
+        elif (file_upload_status_message):
+            print_indented_line(
+                2, 'ERROR',
+                (file_upload_status_message + ' [' + str(self.client_address[0]) + ']')
+                )
+
+        return
+
+
+    # [FUNCTION] PROCESS HTTP PUT REQUEST - UPLOAD FILE
+    def process_HTTP_PUT_req(self):
+        # ASSEMBLE FULL PATH FOR DESTINATION FILE
+        dest_file_full_path = self.transl_rel_path_to_full_path(self.path)
+        # ATTEMPT TO OPEN DESTINATION FILE FOR WRITING/CREATE FILE
         try:
-            # READ FILE IN BINARY MODE (AVOIDS NEWLINE TRANSLATION ERRORS)
-            req_file = open(req_res_full_path, 'rb')
+            dest_file = open(dest_file_full_path, 'wb')
         except IOError:
-        #     FILE DOES NOT EXIST
-            self.send_error(404, 'File not found')
-            return None
-        #     FILE DOES EXIST => ASSEMBLE HTTP RESPONSE HEADER
-        #       GET STATISTICS OF FILE
-        req_file_stats = fstat(req_file.fileno())
-        #       SEND HTTP RESPONSE + LOG FILE SIZE
-        self.send_response(200, str(req_file_stats.st_size))
-        #       GUESS MIME TYPE OF FILE + SET CONTENT-TYPE HTTP HEADER
-        req_file_MIME_type = self.guess_file_MIME_type(req_res_full_path)
-        self.send_header('Content-Type', req_file_MIME_type)
-        #       SET CONTENT-LENGTH AND LAST-MODIFIED HTTP HEADERS
-        self.send_header('Content-Length', str(req_file_stats.st_size))
-        self.send_header('Last-Modified', self.date_time_string(req_file_stats.st_mtime))
-        self.end_headers()
-        #       RETURN CONTENTS OF FILE
-        return req_file
+            return (False, 'Insufficient file permissions (write)', None)
+
+        # FILE UPLOAD PROCESSING
+        #   PARSE FILE SIZE FROM REQUEST
+        uploaded_file_size = int(self.headers['Content-Length'])
+        #   READ FILE CONTENTS FROM REQUEST
+        obtained_data = self.rfile.read(uploaded_file_size)
+        #   WRITE FILE CONTENTS TO DESTINATION FILE
+        dest_file.write(obtained_data)
+        #   CLOSE DESTINATION FILE
+        dest_file.close()
+
+        # ASSEMBLE RESPONSE HTTP HEADER
+        self.send_response(201, str(uploaded_file_size))
+        #   FILE MD5 CHECKSUM FEATURE ENABLED
+        if (not final_file_md5_chksm_disa):
+            # SET 'CONTENT LENGTH' HEADER
+            self.send_header('Content-Length', str(32))
+            self.end_headers()
+            # PROVIDE MD5 HASHSUM IN RESPONSE
+            HTTP_resp_msg_body = BytesIO()
+            HTTP_resp_msg_body.write(bytes(self.calc_file_chksm_md5(dest_file_full_path), 'utf-8'))
+            HTTP_resp_msg_body.seek(0)
+            self.copy_file_obj(HTTP_resp_msg_body, self.wfile)
+            HTTP_resp_msg_body.close()
+            # RETURN FULL DESTINATION PATH AND MD5 HASHSUM OF UPLOADED FILE
+            return (
+               True,
+               (
+                   'FILE UPLOADED: \'%s\' (MD5 %s)' % (
+                        dest_file_full_path,
+                        self.calc_file_chksm_md5(dest_file_full_path)
+                        )
+                    ),
+                uploaded_file_size
+                )
+        #   FILE MD5 CHECKSUM FEATURE DISABLED
+        else:
+            # SET 'CONTENT LENGTH' HEADER
+            self.send_header('Content-Length', str(0))
+            self.end_headers()
+            # RETURN FULL DESTINATION PATH OF UPLOADED FILE
+            return (
+                True,
+                (
+                    'FILE UPLOADED: \'%s\'' % dest_file_full_path
+                    ),
+                uploaded_file_size
+                )
 
 
     # [FUNCTION] DISPLAY DIRECTORY CONTENTS
     def display_dir_contents(self, provided_dir_full_path):
 
-        # [FUNCTION] CONVERT ALL ALPHABET CHARACTERS IN PROVIDED STRING TO LOWERCASE CHARACTERS
+        # [FUNCTION] CONVERT ALL ALPHABET CHARACTERS TO LOWERCASE CHARACTERS
         def str_to_lower_case(provided_filename):
             return provided_filename.lower()
 
 
-        # [FUNCTION] CONVERT PROVIDED FILE SIZE IN BYTES TO HUMAN READABLE FORM
+        # [FUNCTION] CONVERT FILE SIZE FROM BYTES TO HUMAN READABLE FORM
         def conv_fsize_to_hread_form(provided_file_size, file_size_suffix='B'):
             for file_size_unit in [
                     '','Ki','Mi',
@@ -654,7 +969,7 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
                 )
 
 
-        # [FUNCTION] GENERATE LINE (CONTAINING SERVER CONTENT INFORMATION) FOR HTTP RESPONSE MESSAGE BODY
+        # [FUNCTION] GENERATE HTML LINE CONTAINING FILE INFO FOR HTTP RESPONSE MESSAGE BODY
         def gen_HTTP_resp_msg_body_line(
                 provided_res_type, provided_file_size, provided_res_md5_chksm,
                 provided_res_linked_name, provided_res_displayed_name
@@ -671,7 +986,7 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
                         provided_res_displayed_name
                         )
                     ).encode()
-            # FILE MD5 CHECKSUM FEATURE DISABLED
+            # FILE MD5 CHECKSUM FEATURE NOT ENABLED
             else:
                 # CREATE HTML LINK
                 return (
@@ -688,7 +1003,8 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         try:
             provided_dir_filenames_list = listdir(provided_dir_full_path)
         except error:
-            self.send_error(404, 'Insufficient directory permissions (read)')
+            # INSUFFICIENT DIRECTORY READ PERMISSIONS
+            self.send_error(403, '-')
             return None
         # SORT RESULTS
         provided_dir_filenames_list.sort(key=str_to_lower_case)
@@ -700,15 +1016,15 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         HTTP_resp_msg_body = BytesIO()
         #   START HTML
         HTTP_resp_msg_body.write(b'<!DOCTYPE html>\n')
-        HTTP_resp_msg_body.write(b'<html>\n<head>\n<title>Directory Listing Page</title>\n</head>\n')
+        HTTP_resp_msg_body.write(b'<html>\n<head>\n<title>Directory Listing</title>\n</head>\n')
         HTTP_resp_msg_body.write(
-            ('<body>\n<h2>Directory Listing of %s</h2>\n' % provided_dir_full_path).encode()
+            ('<body>\n<h2>%s</h2>\n' % provided_dir_full_path).encode()
             )
         HTTP_resp_msg_body.write(b'<hr>\n')
         #   HTTP POST UPLOAD FORM
         HTTP_resp_msg_body.write(b'<form ENCTYPE="multipart/form-data" method="post">')
-        HTTP_resp_msg_body.write(b'<input name="file" type="file"/>')
-        HTTP_resp_msg_body.write(b'<input type="submit" value="Upload"/></form>\n')
+        HTTP_resp_msg_body.write(b'&ensp;<input name="file" type="file"/>')
+        HTTP_resp_msg_body.write(b'&ensp;<input type="submit" value="Upload"/></form>\n')
         HTTP_resp_msg_body.write(b'<hr>\n<ul style="font-size: 1.3em;">\n')
         #   ADD "ONE DIRECTORY UP", IF NOT IN WEB ROOT DIRECTORY
         if (provided_dir_full_path != final_web_root_dir_full_path):
@@ -786,7 +1102,7 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         req_res_full_path = getcwd()
         # LOOP THROUGH ALL IDENTIFIED ELEMENTS
         for rel_path_word in rel_path_words_list:
-            # ASSEMBLE FULL PATH TO REQUESTED RESOURCE
+            # APPEND ELEMENT TO PREVIOUSLY CONSTRUCTED FULL PATH
             req_res_full_path = path.join(req_res_full_path, rel_path_word)
         # RETURN ASSEMBLED FULL PATH TO REQUESTED RESOURCE
         return req_res_full_path
@@ -809,11 +1125,11 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         #   EXTENSION IN LIST OF MIME TYPES
         if (file_ext in self.file_ext_map):
             return self.file_ext_map[file_ext]
-        #   EXTENSION NOT IN LIST OF MIME TYPES => SET TO EMPTY (CONVERTED TO DEFAULT VALUE)
+        #   EXTENSION NOT IN LIST OF MIME TYPES => SET TO EMPTY (WILL BE CONVERTED TO DEFAULT VALUE)
         return (self.file_ext_map[''])
 
 
-    # INITIALIZE GLOBAL DATA STRUCTURES FOR MIME.TYPES
+    # INITIALIZE GLOBAL DATA STRUCTURES FOR MIME TYPES
     if (not inited):
         init()
     # CREATE MIME TYPE DICTIONARY MAPPING
@@ -925,7 +1241,7 @@ def parse_user_input():
         help='Use specified directory as web server web root directory (default: current directory)',
         default=getcwd()
         )
-    #   DISABLE FILE MD5 CHECKSUMS
+    #   DISABLE SERVER-SIDE FILE MD5 CHECKSUMS
     user_input_parser.add_argument(
         '-dc', '--disable-chksm',
         dest='disable_chksm',
@@ -988,9 +1304,9 @@ def run_OS_cmd(
     return cmd_exec_status
 
 
-# [FUNCTION] GENERATE RANDOM STRING OF PROVIDED LENGTH
+# [FUNCTION] GENERATE RANDOM STRING OF SPECIFIED LENGTH
 def gen_rnd_str(provided_random_string_length):
-    # CHECK IF INTEGER
+    # CHECK IF PROVIDED VALUE INTEGER
     if (
             not isinstance(
                 provided_random_string_length,
@@ -1056,7 +1372,7 @@ def val_user_input(user_input_parser):
         # LOOP ALL IDENTIFIED LOCAL NETWORK INTERFACE NAMES
         for iface_name in local_net_iface_names_list:
             temp_socket = socket(AF_INET, SOCK_DGRAM)
-            # PROVIDED IP ADDRESS IS VALID (I.E. ASSIGNED TO A LOCAL NETWORK INTERFACE)
+            # PROVIDED IP ADDRESS IS VALID (I.E. ASSIGNED TO EXISTING LOCAL NETWORK INTERFACE)
             if (
                     provided_IP_addr == inet_ntoa(
                         ioctl(
@@ -1070,7 +1386,7 @@ def val_user_input(user_input_parser):
                         )
                     ):
                 return True
-        # PROVIDED IP ADDRESS IS INVALID (I.E. NOT ASSIGNED TO ANY LOCAL NETWORK INTERFACE)
+        # PROVIDED IP ADDRESS IS INVALID (I.E. NOT ASSIGNED TO ANY EXISTING LOCAL NETWORK INTERFACE)
         return False
 
 
@@ -1145,10 +1461,10 @@ def val_user_input(user_input_parser):
         # HARDCODED HTTP BASIC AUTHENTICATION REALM IS NOT STRING
         is_var_prov_type(hardcoded_basic_HTTP_authn_realm, str, 'hardcoded HTTP basic authentication realm requires string containing value')
         # PROVIDED USER CREDENTIALS IS STRING + HARDCODED HTTP BASIC AUTHENTICATION REALM IS STRING
-        #   CREDENTIALS USE INVALID FORMAT
+        #   CREDENTIALS NOT IN VALID FORMAT
         if (count_semicolons(provided_username_password) != 1):
             user_input_parser.error(provided_err_msg)
-        #   CREDENTIALS USE VALID FORMAT
+        #   CREDENTIALS IN VALID FORMAT
         #     SPLIT CREDENTIALS INTO USERNAME AND PASSWORD
         final_username, final_password = split_HTTP_basic_authn_creds(provided_username_password)
         #     BASE64-ENCODE USER PROVIDED CREDENTIALS
@@ -1189,6 +1505,7 @@ def val_user_input(user_input_parser):
             return False
         # PROVIDED FILE DOES EXIST
         try:
+            # EXECUTE BINARY WITH PROVIDED CLI ARGUMENT
             bin_exec_status = (
                 provided_cli_bin_id_text in (
                     check_output(
@@ -1274,10 +1591,10 @@ def val_user_input(user_input_parser):
                 ],
             'is_valid_x509_cert_PEM OS command execution error', 0, 0
             )
-        # COMMAND EXECUTED WITH ERRORS
+        # COMMAND EXECUTED WITH ERRORS => INVALID X.509 CRETIFICATE
         if (command_exec_status.returncode == 1):
             return False
-        # COMMAND EXECUTED WITH NO ERRORS
+        # COMMAND EXECUTED WITH NO ERRORS => VALID X.509 CERTIFICATE
         return True
 
 
@@ -1302,34 +1619,34 @@ def val_user_input(user_input_parser):
         return provided_file_full_path
 
 
-    # [FUNCTION] VALIDATE PROVIDED X.509 CERTIFICATE SUBJECT DATA
+    # [FUNCTION] VALIDATE PROVIDED SUBJECT DATA OF X.509 CERTIFICATE
     def val_x509_subj(provided_x509_subj, provided_err_msg):
-        # PROVIDED X.509 CERTIFICATE SUBJECT DATA IS NOT STRING
+        # PROVIDED SUBJECT DATA IS NOT STRING
         is_var_prov_type(provided_x509_subj, str, provided_err_msg)
-        # PROVIDED X.509 CERTIFICATE SUBJECT DATA IS STRING
-        #   ATTEMPT TO PARSE PROVIDED X.509 CERTIFICATE SUBJECT DATA
+        # PROVIDED SUBJECT DATA IS STRING
+        #   ATTEMPT TO PARSE PROVIDED SUBJECT DATA
         x509_subj_list = findall(
             r'/C=(.*)/ST=(.*)/L=(.*)/O=(.*)/OU=(.*)/CN=(.*)',
             provided_x509_subj
             )
-        #   PROVIDED X.509 CERTIFICATE SUBJECT DATA IS NOT VALID
+        #   PROVIDED SUBJECT DATA IS NOT VALID
         if (not x509_subj_list):
             user_input_parser.error(provided_err_msg)
-        #   PROVIDED X.509 CERTIFICATE SUBJECT DATA IS VALID
+        #   PROVIDED SUBJECT DATA IS VALID
         return provided_x509_subj
 
 
-    # [FUNCTION] VALIDATE PROVIDED X.509 CERTIFICATE COMMON NAME
+    # [FUNCTION] VALIDATE PROVIDED COMMON NAME OF X.509 CERTIFICATE
     def val_x509_cn(provided_x509_cn, provided_err_msg):
-        # PROVIDED X.509 CERTIFICATE COMMON NAME IS NOT STRING
+        # PROVIDED COMMON NAME IS NOT STRING
         is_var_prov_type(provided_x509_cn, str, provided_err_msg)
-        # PROVIDED X.509 CERTIFICATE COMMON NAME IS STRING
+        # PROVIDED COMMON NAME IS STRING
         return provided_x509_cn
 
 
     # [FUNCTION] VALIDATE DATA REQUIRED TO AUTOGENERATE (TEMPORARY) X.509 CERTIFICATE
     def val_temp_x509_data(provided_temp_x509_cn):
-        # VALIDATE HARDCODED X.509 CERTIFICATE SUBJECT DATA (REQUIRED BY AUTOGENERATE CERTIFICATE FUNCTIONALITY)
+        # VALIDATE HARDCODED SUBJECT DATA OF X.509 CERTIFICATE (REQUIRED BY AUTOGENERATE CERTIFICATE FUNCTIONALITY)
         temp_x509_cert_subj_full = val_x509_subj(
             hardcoded_temp_x509_cert_subj,
             'hardcoded subject data of temporary X.509 certificate requires string containing valid data ("/C=.../ST=.../L=.../O=.../OU=.../CN=")'
@@ -1409,6 +1726,7 @@ def val_user_input(user_input_parser):
             if(len(provided_str_octets_list) == 4):
                 # LOOP IDENTIFIED OCTETS
                 is_str_IP_addr = vrfy_IP_addr_octets(provided_str_octets_list)
+        # RETURN RESULT
         return is_str_IP_addr
 
 
@@ -1436,7 +1754,7 @@ def val_user_input(user_input_parser):
         #   PROVIDED LIST OF IP ADDRESS(ES) CONTAINS INVALID IP ADDRESS(ES)
         elif (not does_str_contain_IPs(provided_IPs_list)):
             user_input_parser.error(provided_err_msg)
-        #   PROVIDED LIST OF IP ADDRESS(ES) CONTAINS NO SPACE CHARACTER(S) AND VALID IP ADDRESS(ES)
+        #   PROVIDED LIST OF IP ADDRESS(ES) CONTAINS NO SPACE CHARACTER(S) AND CONTAINS VALID IP ADDRESS(ES)
         return provided_IPs_list.split(',')
 
 
@@ -1533,7 +1851,7 @@ def val_user_input(user_input_parser):
         # USE PREDEFINED (DEFAULT) VALUE FOR LISTENING PORT
         final_list_port = 443
 
-    # PORT/TCP SOCKET BEING USED
+    # CHECK IF LISTENING PORT/TCP SOCKET ALREADY BEING USED
     if (
             is_TCP_socket_used(
                 final_local_net_iface,
@@ -1545,12 +1863,12 @@ def val_user_input(user_input_parser):
     #### AUTHENTICATION
     # HTTP BASIC AUTHENTICATION DISABLED
     if (hardcoded_authn_disa or provided_arguments.disable_authn):
-        # [OPTION] HARDCODED DISABLE BASIC AUTHENTICATION IS NOT BOOLEAN
-        #   USER DID NOT PROVIDE ARGUMENT
+        # USER DID NOT PROVIDE DISABLE AUTHENTICATION VIA CLI
         if (not provided_arguments.disable_authn):
+            # HARDCODED DISABLE BASIC AUTHENTICATION IS NOT BOOLEAN
             is_var_prov_type(hardcoded_authn_disa, bool, 'hardcoded disabled authentication variable requires boolean value')
+        # [OPTION] USER DID PROVIDE DISABLE AUTHENTICATION VIA CLI
         # [OPTION] HARDCODED DISABLE BASIC AUTHENTICATION IS BOOLEAN
-        # [OPTION] USER DID PROVIDE ARGUMENT
         final_authn_disa = True
 
         # USER DID PROVIDE CREDENTIALS VIA CLI
@@ -1592,12 +1910,12 @@ def val_user_input(user_input_parser):
     #### ENCRYPTION
     # ENCRYPTION (TLS) DISABLED
     if (hardcoded_encr_disa or provided_arguments.disable_encr):
-        # [OPTION] HARDCODED DISABLE ENCRYPTION IS NOT BOOLEAN
-        #   USER DID NOT PROVIDE ARGUMENT
+        # USER DID NOT PROVIDE DISABLE ENCRYPTION VIA CLI
         if (not provided_arguments.disable_encr):
+            # HARDCODED DISABLE ENCRYPTION IS NOT BOOLEAN
             is_var_prov_type(hardcoded_encr_disa, bool, 'hardcoded disabled encryption variable requires boolean value')
+        # [OPTION] USER DID PROVIDE DISABLE ENCRYPTION VIA CLI
         # [OPTION] HARDCODED DISABLE ENCRYPTION IS BOOLEAN
-        # [OPTION] USER DID PROVIDE ARGUMENT
         final_encr_disa = True
 
         # USER DID PROVIDE X.509 CERTIFICATE PATH VIA CLI
@@ -1680,33 +1998,33 @@ def val_user_input(user_input_parser):
     #### FILE MD5 CHECKSUMS
     # FILE MD5 CHECKSUMS DISABLED
     if (hardcoded_file_md5_chksm_disa or provided_arguments.disable_chksm):
-        # [OPTION] HARDCODED DISABLE FILE MD5 CHECKSUMS IS NOT BOOLEAN
-        #   USER DID NOT PROVIDE ARGUMENT
+        # USER DID NOT PROVIDE DISABLE FILE CHECKSUM VIA CLI
         if (not provided_arguments.disable_chksm):
+            # HARDCODED DISABLE FILE CHECKSUM IS NOT BOOLEAN
             is_var_prov_type(hardcoded_file_md5_chksm_disa, bool, 'hardcoded disabled file MD5 checksums variable requires boolean value')
-        # [OPTION] HARDCODED DISABLE FILE MD5 CHECKSUMS IS BOOLEAN
-        # [OPTION] USER DID PROVIDE ARGUMENT
+        # [OPTION] USER DID PROVIDE DISABLE FILE CHECKSUM VIA CLI
+        # [OPTION] HARDCODED DISABLE FILE CHECKSUM IS BOOLEAN
         final_file_md5_chksm_disa = True
 
     #### ACCESS RESTRICTION
     # IPTABLES ACCESS RESTRICTION DISABLED (IP LAYER)
     if (hardcoded_IP_acc_restr_disa or provided_arguments.disable_IP_fw):
-        # [OPTION] HARDCODED DISABLE IPTABLES ACCESS RESTRICTION IS NOT BOOLEAN
-        #   USER DID NOT PROVIDE ARGUMENT
+        # USER DID NOT PROVIDE DISABLE IP FIREWALL VIA CLI
         if (not provided_arguments.disable_IP_fw):
+            # HARDCODED DISABLE IP FIREWALL IS NOT BOOLEAN
             is_var_prov_type(hardcoded_IP_acc_restr_disa, bool, 'hardcoded disabled iptables access restriction variable requires boolean value')
-        # [OPTION] HARDCODED DISABLE IPTABLES ACCESS RESTRICTION IS BOOLEAN
-        # [OPTION] USER DID PROVIDE ARGUMENT
+        # [OPTION] USER DID PROVIDE DISABLE IP FIREWALL VIA CLI
+        # [OPTION] HARDCODED DISABLE IP FIREWALL IS BOOLEAN
         final_IP_acc_restr_disa = True
 
     # HTTP ACCESS RESTRICTION DISABLED (APPLICATION LAYER)
     if (hardcoded_app_acc_restr_disa or provided_arguments.disable_app_fw):
-        # [OPTION] HARDCODED DISABLE HTTP ACCESS RESTRICTION IS NOT BOOLEAN
-        #   USER DID NOT PROVIDE ARGUMENT
+        # USER DID NOT PROVIDE DISABLE APPLICATION FIREWALL VIA CLI
         if (not provided_arguments.disable_app_fw):
+            # HARDCODED DISABLE APPLICATION FIREWALL IS NOT BOOLEAN
             is_var_prov_type(hardcoded_app_acc_restr_disa, bool, 'hardcoded disabled HTTP access restriction variable requires boolean value')
-        # [OPTION] HARDCODED DISABLE HTTP ACCESS RESTRICTION IS BOOLEAN
-        # [OPTION] USER DID PROVIDE ARGUMENT
+        # [OPTION] USER DID PROVIDE DISABLE APPLICATION FIREWALL VIA CLI
+        # [OPTION] HARDCODED DISABLE APPLICATION FIREWALL IS BOOLEAN
         final_app_acc_restr_disa = True
 
     # BOTH ACCESS RESTRICTION MECHANISMS DISABLED (IP; APPLICATION)
@@ -1719,7 +2037,8 @@ def val_user_input(user_input_parser):
                     )
                 ):
             user_input_parser.error('"--allow-access" argument not required with disabled access restriction')
-        # ALLOW ACCESS TO ANY IP ADDRESS
+        # USER DID NOT PROVIDE (LIST OF) ALLOWED CLIENT IP(S) VIA CLI
+        #   ALLOW ACCESS TO ANY IP ADDRESS
         final_allowed_client_IPs_list = ['0.0.0.0']
 
     # IPTABLES ACCESS RESTRICTION ENABLED (IP LAYER)
@@ -1773,9 +2092,9 @@ def modify_iptables_rules(provided_allowed_client_IPs, provided_allowed_TCP_port
 
     # LOOP ALL PROVIDED ALLOWED CLIENT IP ADDRESSES
     for allowed_client_IP in provided_allowed_client_IPs:
-        # MODIFY CLIENT IP ADDRESS (ANY IP)
+        # ANY IP ADDRESS - MODIFY CLIENT IP ADDRESS
         if (allowed_client_IP == '0.0.0.0'):
-            # CREATE/DELETE IPTABLES FIREWALL ALLOW RULE - ANY IP ADDRESS
+            # CREATE/DELETE IPTABLES FIREWALL ALLOW RULE
             run_OS_cmd(
                 [
                     final_iptables_bin_full_path, iptables_action_switch_arg, 'INPUT',
@@ -1785,9 +2104,9 @@ def modify_iptables_rules(provided_allowed_client_IPs, provided_allowed_TCP_port
                     ],
                 'modify_iptables_rules OS command execution error (allow any)', 4, 2
                 )
-        # DO NOT MODIFY CLIENT IP ADDRESS
+        # SPECIFIED CLIENT IP ADDRESS - DO NOT MODIFY CLIENT IP ADDRESS
         else:
-            # CREATE/DELETE IPTABLES FIREWALL ALLOW RULE - SPECIFIED CLIENT IP ADDRESS
+            # CREATE/DELETE IPTABLES FIREWALL ALLOW RULE
             run_OS_cmd(
                 [
                     final_iptables_bin_full_path, iptables_action_switch_arg, 'INPUT',
@@ -1797,6 +2116,7 @@ def modify_iptables_rules(provided_allowed_client_IPs, provided_allowed_TCP_port
                     ],
                 'modify_iptables_rules OS command execution error (allow IP)', 4, 2
                 )
+
     # CREATE/DELETE IPTABLES FIREWALL DROP AND LOG RULES
     run_OS_cmd(
         [
@@ -1834,7 +2154,7 @@ def create_iptables_rules(provided_allowed_client_IPs, provided_allowed_TCP_port
         )
 
 
-# [FUNCTION] DELETE CREATED IPTABLES FIREWALL RULES
+# [FUNCTION] DELETE PREVIOUSLY CREATED IPTABLES FIREWALL RULES
 def delete_iptables_rules(provided_allowed_client_IPs, provided_allowed_TCP_port):
     return modify_iptables_rules(
         provided_allowed_client_IPs,
@@ -1891,21 +2211,21 @@ def process_user_input(provided_arguments):
                 )
 
 
-    # [FUNCTION] PRINT X.509 CERTIFICATE COMMON NAME RELATED SETTINGS
+    # [FUNCTION] PRINT CURRENT SETTINGS OF COMMON NAME (X.509 CERTIFICATE) TO OUTPUT
     def output_current_settings_x509_cn(provided_arguments, provided_print_indent):
-        # USER PROVIDED (VALID) COMMON NAME OF AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE VIA CLI
+        # USER PROVIDED (VALID) COMMON NAME FOR AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE VIA CLI
         if (provided_arguments.temp_x509_cn):
             print_indented_line(
                 provided_print_indent, 'INFO',
                 'Using provided CN (CLI)'
                 )
-        # HARDCODED (VALID) COMMON NAME OF AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE
+        # HARDCODED (VALID) COMMON NAME FOR AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE
         elif (hardcoded_temp_x509_cert_CN):
             print_indented_line(
                 provided_print_indent, 'INFO',
                 'Using provided CN (hardcoded)'
                 )
-        # USER DID NOT PROVIDE COMMON NAME OF AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE VIA CLI + COMMON NAME OF AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE NOT HARDCODED => DEFAULT (PREDEFINED) VALUE USED
+        # USER DID NOT PROVIDE COMMON NAME FOR AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE VIA CLI + COMMON NAME FOR AUTOGENERATED (TEMPORARY) X.509 CERTIFICATE NOT HARDCODED => DEFAULT (PREDEFINED) VALUE USED
         else:
             print_indented_line(
                 provided_print_indent, 'INFO',
@@ -2032,7 +2352,7 @@ def process_user_input(provided_arguments):
                 )
 
 
-    # PRINT SPECIFIED USER CONFIGURATION/SETTINGS
+    # PRINT CURRENT CONFIGURATION/SETTINGS TO OUTPUT
     print_indented_line(
         0, 'SUCCESS',
         'Barabbas online'
@@ -2175,11 +2495,10 @@ def process_user_input(provided_arguments):
 
 # [FUNCTION] RUN/START WEB SERVER
 def run_web_server(
-        server_class=HTTPServer, handler_class=SimpleHTTPRequestHandlerWithUploadAuthentication, iface='',
-        port=8000, disable_tls=False, directory=getcwd()
+        handler_class=SimpleHTTPRequestHandlerWithUploadAuthentication, iface='', port=8000,
+        disable_tls=False, directory=getcwd()
         ):
-    server_address = (iface, port)
-    httpd = server_class(server_address, handler_class)
+    httpd = ThreadingSimpleServer((iface, port), handler_class)
     sa = httpd.socket.getsockname()
 
     # CHANGE CURRENT DIRECTORY TO WEB ROOT DIRECTORY
