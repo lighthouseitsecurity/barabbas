@@ -1,8 +1,8 @@
 #!/usr/bin/python3
 
-__version__ = '1.1.0'
+__version__ = '1.1.1'
 __author__ = 'Tomislav Paskalev'
-__year__ = '2022'
+__year__ = '2023'
 
 
 ################################################################
@@ -27,7 +27,7 @@ from shutil import copyfileobj
 from signal import SIGINT, signal
 from socket import AF_INET, gethostname, inet_ntoa, SOCK_DGRAM, socket
 from socketserver import ThreadingMixIn
-from ssl import SSLError, wrap_socket
+from ssl import SSLError, SSLContext, wrap_socket, PROTOCOL_TLS_SERVER
 from string import ascii_letters, digits
 from struct import pack
 from subprocess import CalledProcessError, check_output, DEVNULL, run
@@ -79,12 +79,12 @@ hardcoded_iptables_bin_full_path = ''
 #     NOTES - LINUX:
 #       CURL X.509 CERTIFICATE VALIDATION WILL WORK WITH FOLLOWING VALUES:
 #         IP ADDRESS OF LOCAL LISTENING NETWORK INTERFACE
-#         HOSTNAME
-#       WGET X.509 CERTIFICATE VALIDATION WILL WORK ONLY WITH HOSTNAME VALUE
+#         HOSTNAME (DNS-RESOLVABLE BY TARGET SYSTEM)
+#       WGET X.509 CERTIFICATE VALIDATION WILL WORK ONLY WITH HOSTNAME VALUE (DNS-RESOLVABLE BY TARGET SYSTEM)
 #     NOTES - WINDOWS:
 #       POWERSHELL X.509 CERTIFICATE VALIDATION WILL WORK WITH FOLLOWING VALUES:
 #         IP ADDRESS OF LOCAL LISTENING NETWORK INTERFACE
-#         HOSTNAME
+#         HOSTNAME (DNS-RESOLVABLE BY TARGET SYSTEM)
 hardcoded_temp_x509_cert_CN = ''
 
 #### REQUIRED VALUES (MUST BE SPECIFIED)
@@ -420,6 +420,14 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         return True
 
 
+    # [FUNCTION] CLOSE OPEN HTTP CONNECTION AND PROVIDE CLIENT ERROR CODE IN RESPONSE
+    def close_open_connection(self, http_error_code):
+        self.send_response(http_error_code)
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        return
+
+
     # [FUNCTION] SERVE HTTP HEAD REQUEST
     def do_HEAD(self):
         # PERFORM SECURITY CHECKS ON CURRENT CLIENT
@@ -578,9 +586,11 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
             return (False, 'No Content-Type HTTP header', None)
         # PARSE BOUNDARY MARKER
         try:
-            boundary_marker = content_type_HTTP_header.split('=')[1].encode()
+            boundary_marker = content_type_HTTP_header.split('=')[1].split(';')[0].encode()
         except IndexError:
-            return(False, 'Invalid Content-Type HTTP header', None)
+            # SEND HTTP 415 UNSUPPORTED MEDIA TYPE RESPONSE HEADER
+            self.close_open_connection(415)
+            return(False, 'Invalid Content-Type HTTP header ({})'.format(content_type_HTTP_header), None)
 
         # GET TOTAL CONTENT LENGTH
         remaining_bytes = int(self.headers['Content-Length'])
@@ -624,6 +634,8 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         try:
             dest_file = open(dest_file_full_path, 'wb')
         except IOError:
+            # SEND HTTP 422 UNPROCESSABLE CONTENT RESPONSE HEADER
+            self.close_open_connection(422)
             return (False, 'Insufficient file permissions (write)', None)
 
         # PROCESS FIFTH LINE OF CONTENT - FIRST LINE OF UPLOADED FILE'S CONTENT
@@ -735,6 +747,8 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
             try:
                 bits_dest_file = open(bits_dest_file_full_path, 'wb')
             except IOError:
+                # SEND HTTP 422 UNPROCESSABLE CONTENT RESPONSE HEADER
+                self.close_open_connection(422)
                 return (False, 'Insufficient file permissions (write)', None)
 
             # UPDATE GLOBAL DICTIONARY FOR MANAGING FILES OF ACTIVE BITS SESSIONS - ADD CURRENT SESSION + DESTINATION FILE
@@ -885,11 +899,18 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         try:
             dest_file = open(dest_file_full_path, 'wb')
         except IOError:
+            # SEND HTTP 422 UNPROCESSABLE CONTENT RESPONSE HEADER
+            self.close_open_connection(422)
             return (False, 'Insufficient file permissions (write)', None)
 
         # FILE UPLOAD PROCESSING
         #   PARSE FILE SIZE FROM REQUEST
-        uploaded_file_size = int(self.headers['Content-Length'])
+        try:
+            uploaded_file_size = int(self.headers['Content-Length'])
+        except TypeError:
+            # SEND HTTP 411 LENGTH REQUIRED RESPONSE HEADER
+            self.close_open_connection(411)
+            return(False, 'Invalid Content-Length HTTP header', None)
         #   READ FILE CONTENTS FROM REQUEST
         obtained_data = self.rfile.read(uploaded_file_size)
         #   WRITE FILE CONTENTS TO DESTINATION FILE
@@ -1024,7 +1045,7 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         #   HTTP POST UPLOAD FORM
         HTTP_resp_msg_body.write(b'<form ENCTYPE="multipart/form-data" method="post">')
         HTTP_resp_msg_body.write(b'&ensp;<input name="file" type="file"/>')
-        HTTP_resp_msg_body.write(b'&ensp;<input type="submit" value="Upload"/></form>\n')
+        HTTP_resp_msg_body.write(b'<p style="margin: 10px;"></p>&ensp;<input type="submit" value="Upload"/></form>\n')
         HTTP_resp_msg_body.write(b'<hr>\n<ul style="font-size: 1.3em;">\n')
         #   ADD "ONE DIRECTORY UP", IF NOT IN WEB ROOT DIRECTORY
         if (provided_dir_full_path != final_web_root_dir_full_path):
@@ -1097,7 +1118,9 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         normalized_provided_rel_path_words_list = normalized_provided_rel_path.split('/')
         # REMOVE EMPTY ELEMENTS
         rel_path_words_list = filter(None, normalized_provided_rel_path_words_list)
-
+        # AVOIDS ERROR IN HTTP POST FILE UPLOAD SCENARIOS WHEN URI CONTAINS FILENAME
+        if (self.command == 'POST'):
+            ''.join(rel_path_words_list)
         # GET CURRENT DIRECTORY
         req_res_full_path = getcwd()
         # LOOP THROUGH ALL IDENTIFIED ELEMENTS
@@ -1185,7 +1208,7 @@ def print_indented_line(provided_indent_depth, provided_msg_type, provided_msg_t
 def parse_user_input():
     # DEFINE COMMAND ARGUMENTS
     user_input_parser = ArgumentParser(
-        description='Simple Python3 web server with file upload (HTTP POST), authentication (HTTP Basic), encryption (TLS) and access restriction (IP; HTTP) functionalities',
+        description='Simple Python3 web server with file upload (HTTP POST; HTTP PUT; HTTP BITS_POST), authentication (server: X.509; client: HTTP Basic), encryption (TLS) and access restriction (IP; HTTP) functionalities.',
         add_help=True
         )
     #   SPECIFY LOCAL NETWORK INTERFACE
@@ -1231,7 +1254,7 @@ def parse_user_input():
     user_input_parser.add_argument(
         '-de', '--disable-encr',
         dest='disable_encr',
-        help='Disable web server authentication and encrypted communication (TLS v1.2; default: enabled)',
+        help='Disable web server authentication (X.509) and encrypted communication (TLS v1.2; default: enabled)',
         action='store_true'
         )
     #   SPECIFY WEB ROOT DIRECTORY
@@ -1259,14 +1282,14 @@ def parse_user_input():
     user_input_parser.add_argument(
         '-di', '--disable-IP-fw',
         dest='disable_IP_fw',
-        help='Disable IP layer access restriction (iptables; default:enabled)',
+        help='Disable IP layer IP address access restriction (iptables; default:enabled)',
         action='store_true'
         )
     #   DISABLE HTTP ACCESS RESTRICTION
     user_input_parser.add_argument(
         '-dh', '--disable-app-fw',
         dest='disable_app_fw',
-        help='Disable application layer access restriction (HTTP; default:enabled)',
+        help='Disable application layer IP address access restriction (HTTP; default:enabled)',
         action='store_true'
         )
     #   DISPLAY PROGRAM VERSION INFORMATION
@@ -2514,7 +2537,13 @@ def run_web_server(
             2, 'INFO',
             'Press \033[1;31mCtrl+c\033[1;m to stop web server and exit'
             )
-        httpd.socket = wrap_socket(httpd.socket, certfile=final_x509_cert_full_path, server_side=True)
+        # CONFIGURE TLS CONTEXT
+        TLS_context = SSLContext(PROTOCOL_TLS_SERVER)
+        TLS_context.check_hostname = False
+        TLS_context.load_cert_chain(certfile=final_x509_cert_full_path)
+        # RUN HTTPD WITH SPECIFIED TLS CONTEXT
+        httpd.socket = TLS_context.wrap_socket(httpd.socket, server_side=True)
+
     # ENCRYTPTION (TLS) IS NOT USED
     else:
         print_indented_line(
