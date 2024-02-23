@@ -1,4 +1,4 @@
-# barabbas v1.1.1
+# barabbas v1.1.2
 
 <p align="justify">Barabbas is an open source minimalistic web server, used for file transfer (download; upload).
 It supports authentication (client; server), encryption (data transfer), access restriction (client) and file integrity checking (validation).
