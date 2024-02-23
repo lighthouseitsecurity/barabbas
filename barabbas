@@ -1,8 +1,8 @@
 #!/usr/bin/python3
 
-__version__ = '1.1.1'
+__version__ = '1.1.2'
 __author__ = 'Tomislav Paskalev'
-__year__ = '2023'
+__year__ = '2024'
 
 
 ################################################################
@@ -171,6 +171,13 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         # TLSV1_ALERT_UNKNOWN_CA, SENT BY SOME CLIENTS, WHEN NOT POSSIBLE TO VERIFY SERVER CERTIFICATE (UNKNOWN ISSUER)
         except SSLError:
             pass
+        # CATCH ANY UNHANDLED EXCEPTIONS
+        except Exception as error_message:
+            print_indented_line(
+                2, 'WARNING',
+                (str(error_message))
+            )
+            pass
         while not self.close_connection:
             try:
                 self.handle_one_request()
@@ -180,6 +187,13 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
                     2, 'WARNING',
                     ('Connection reset by client (HTTP) [' + self.client_address[0] + ']')
                     )
+                pass
+            # CATCH ANY UNHANDLED EXCEPTIONS
+            except Exception as error_message:
+                print_indented_line(
+                    2, 'WARNING',
+                    (str(error_message))
+                )
                 pass
 
 
@@ -510,9 +524,10 @@ class SimpleHTTPRequestHandlerWithUploadAuthentication(BaseHTTPRequestHandler):
         #       GUESS MIME TYPE OF FILE + SET 'CONTENT-TYPE' HTTP HEADER
         req_file_MIME_type = self.guess_file_MIME_type(req_res_full_path)
         self.send_header('Content-Type', req_file_MIME_type)
-        #       SET 'CONTENT-LENGTH' AND 'LAST-MODIFIED' HTTP HEADERS
+        #       SET HTTP RESPONSE HEADERS
         self.send_header('Content-Length', str(req_file_stats.st_size))
         self.send_header('Last-Modified', self.date_time_string(req_file_stats.st_mtime))
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         #       RETURN FILE OBJECT
         return req_file
@@ -2458,7 +2473,7 @@ def process_user_input(provided_arguments):
     #### FILE MD5 CHECKSUMS
     output_current_settings_disa(
         provided_arguments.disable_chksm, hardcoded_file_md5_chksm_disa,
-        'File MD5 checksums', 'INFO'
+        'File MD5 checksums', 'WARNING'
         )
 
     ##### ACCESS RESTRICTION
