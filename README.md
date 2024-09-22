@@ -1,4 +1,4 @@
-# barabbas v1.1.2
+# barabbas v1.1.3
 
 <p align="justify">Barabbas is an open source minimalistic web server, used for file transfer (download; upload).
 It supports authentication (client; server), encryption (data transfer), access restriction (client) and file integrity checking (validation).
@@ -48,9 +48,10 @@ Usage
 ----
 
 ```
-usage: barabbas [-h] [-i LOCAL_IFACE_IP] [-p PORT] [-up USERNAME:PASSWORD] [-da] [-c X509_CERT_PATH] [-cn TEMP_X509_CN] [-de] [-w WEB_ROOT_PATH] [-dc] [-a CLIENT_IP_ADDR] [-di] [-dh] [-v]
+usage: barabbas [-h] [-i LOCAL_IFACE_IP] [-p PORT] [-up USERNAME:PASSWORD] [-da] [-c X509_CERT_PATH] [-cn TEMP_X509_CN]
+                [-de] [-w WEB_ROOT_PATH] [-dc] [-a CLIENT_IP_ADDR] [-di] [-dh] [-v]
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
   -i LOCAL_IFACE_IP, --interface LOCAL_IFACE_IP
                         Use specified IP address of local network interface as web server listening interface (default:
