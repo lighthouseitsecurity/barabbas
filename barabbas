@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-__version__ = '1.1.2'
+__version__ = '1.1.3'
 __author__ = 'Tomislav Paskalev'
 __year__ = '2024'
 
@@ -27,7 +27,10 @@ from shutil import copyfileobj
 from signal import SIGINT, signal
 from socket import AF_INET, gethostname, inet_ntoa, SOCK_DGRAM, socket
 from socketserver import ThreadingMixIn
-from ssl import SSLError, SSLContext, wrap_socket, PROTOCOL_TLS_SERVER
+from ssl import SSLError, SSLContext, PROTOCOL_TLS_SERVER
+from sys import version_info
+if ((version_info.major == 3) and (version_info.minor < 12)):
+  from ssl import wrap_socket
 from string import ascii_letters, digits
 from struct import pack
 from subprocess import CalledProcessError, check_output, DEVNULL, run
