@@ -1,4 +1,6 @@
 # barabbas v1.1.3
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/glightbox/dist/css/glightbox.min.css" />
+<script src="https://cdn.jsdelivr.net/gh/mcstudios/glightbox/dist/js/glightbox.min.js"></script>
 
 <p align="justify">Barabbas is an open source minimalistic web server, used for file transfer (download; upload).
 It supports authentication (client; server), encryption (data transfer), access restriction (client) and file integrity checking (validation).
@@ -14,7 +16,9 @@ Screenshot
 
 <p align="center">
   <kbd>
-    <img src="https://github.com/lighthouseitsecurity/barabbas/wiki/images/server/configs/barabbas_-_server_-_default_-_1-1.jpg">
+    <a href="https://github.com/lighthouseitsecurity/barabbas/wiki/images/server/configs/barabbas_-_server_-_default_-_1-1.jpg" class="glightbox">
+      <img src="https://github.com/lighthouseitsecurity/barabbas/wiki/images/server/configs/barabbas_-_server_-_default_-_1-1.jpg" alt="image" >
+    </a>
   </kbd>
 </p>
 
@@ -240,3 +244,7 @@ Currently supported donation options:
 <p align="justify">Received donations will also result with more frequent content updates.</p>
 
 Thanks!
+
+<script type="text/javascript">
+  const lightbox = GLightbox();
+</script>
