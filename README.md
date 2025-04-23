@@ -14,7 +14,10 @@ Screenshot
 
 <p align="center">
   <kbd>
-    <img src="https://github.com/lighthouseitsecurity/barabbas/wiki/images/server/configs/barabbas_-_server_-_default_-_1-1.jpg" alt="image" >
+    <picture>
+      <source media="" srcset="https://github.com/lighthouseitsecurity/barabbas/wiki/images/server/configs/barabbas_-_server_-_default_-_1-1.jpg">
+      <img src="https://github.com/lighthouseitsecurity/barabbas/wiki/images/server/configs/barabbas_-_server_-_default_-_1-1.jpg">
+    </picture>
   </kbd>
 </p>
 
