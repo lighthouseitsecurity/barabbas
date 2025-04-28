@@ -244,7 +244,7 @@ Currently supported donation options:
   <kbd>
     <picture>
       <source media="" srcset="https://raw.githubusercontent.com/wiki/lighthouseitsecurity/barabbas/images/qr/qr_barabbas_tool.png">
-      <img src="https://raw.githubusercontent.com/wiki/lighthouseitsecurity/barabbas/images/qr/qr_barabbas_tool.png">
+      <img src="https://raw.githubusercontent.com/wiki/lighthouseitsecurity/barabbas/images/qr/qr_barabbas_tool.png" height="250px" width="250px">
     </picture>
   </kbd>
 </p>
