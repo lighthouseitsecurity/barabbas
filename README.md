@@ -112,10 +112,10 @@ The tool was developed according to the following high-level guidelines:
       * zero dependencies (i.e. must work out of the box with plain Python3)
       * single file (i.e. self-contained)
       * must work on default installations of the most widely used Linux distributions (i.e. without requiring any additional OS configuration changes)
-* functionality wise, straight to the point
+* functionality-wise, straight to the point
   * do (only) one thing (file transfer)
   * additionally, only implement relevant functionalities (i.e. avoid bloat)
-* configuration/usage wise, straightforward, simple, flexible and economic
+* configuration-/usage-wise, straightforward, simple, flexible and economic
   * overall, keep any additional typing/configuring on the bare minimum (i.e. take out the monkey work out of the equation, as much as possible)
     * default config - use the most meaningful settings
       * just run the tool (i.e. avoid any extra typing)
@@ -181,8 +181,8 @@ Implemented functionalities
     * overall, seemed like an overkill (considering the tool's purpose)
   * additional file upload methods (low priority task)
     * ```HTTP POST (application/x-www-form-urlencoded)```
-  * IPv6 support (required for rarely encountered scenarios, i.e. low priority task)
-  * QUIC support (required for rarely encountered scenarios, i.e. low priority task)
+  * IPv6 support (required for rarely encountered scenarios, i.e. low-priority task)
+  * QUIC support (required for rarely encountered scenarios, i.e. low-priority task)
   * cross-platform support (e.g. Windows/Commando VM)
 
 Intended audience
@@ -198,7 +198,7 @@ Intended usage
 <p align="justify">For penetration testing/red teaming purposes, the idea is to start the web server (when required), perform the file upload/download activity, followed by (immediately) stoping the web server, once the file transfer is finished (i.e. start server ➔ dl/ul file(s) ➔ stop server).
 In other words, the tool is intended to be used only on demand (i.e. NOT left running in the background, when idle).
 
-DISCLAIMER: **The author of the tool is NOT responsible for any damage, caused by using this tool. Use this tool at your own risk.** The underlying Python3 platform can be interacted with, in certain configurations/scenarios. This may result with execution of arbitrary Python code or external programs, [as stated](https://github.com/python/cpython/blob/3.9/Lib/http/server.py) by its vendor, Python Software Foundation.</p>
+DISCLAIMER: **The author of the tool is NOT responsible for any damage, caused by using this tool. Use this tool at your own risk.** The underlying Python3 platform can be interacted with, in certain configurations/scenarios. This may result with execution of arbitrary Python code or external programs, [as stated](https://github.com/python/cpython/blob/3.14/Lib/http/server.py#L21-L22) by its vendor, Python Software Foundation.</p>
 
 Additional remarks/notes:
 * **do NOT use** this tool in any **production environment**
@@ -210,7 +210,8 @@ Additional remarks/notes:
 * this tool was NOT designed for usage over extended time periods
   * may result with stability issues (tool restart required)
 * this tool is NOT a full-blown web server
-  * will not match the performance of one
+  * will not match its performance
+  * will not match its supported functionalities
 
 Tested environments
 ----
