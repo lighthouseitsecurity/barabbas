@@ -88,9 +88,9 @@ All options can be specified:
   * will override respective default and hardcoded values
 
 Concrete examples of various server and client configurations, along with additional screenshots, can be found on the wiki:
-* [File Download](https://github.com/lighthouseitsecurity/barabbas/wiki/File_Download#file-download)
-* [File Upload](https://github.com/lighthouseitsecurity/barabbas/wiki/File_Upload#file-upload)
-* [Server Configurations](https://github.com/lighthouseitsecurity/barabbas/wiki/Server_Configurations#server-configurations)
+* [File Download](https://github.com/lighthouseitsecurity/barabbas/wiki/DL)
+* [File Upload](https://github.com/lighthouseitsecurity/barabbas/wiki/UL)
+* [Server Configurations](https://github.com/lighthouseitsecurity/barabbas/wiki/Srv_conf)
 
 Story/Idea
 ----
